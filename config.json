@@ -2,7 +2,7 @@
   "version": "free-baseline-0.1",
   "spending_ceiling_usd": 0,
   "registration_confirmed": true,
-  "live_enabled": false,
+  "live_enabled": true,
   "expected_bot_user_id": 310267,
   "season_project": 33121,
   "practice_project": 32977,
