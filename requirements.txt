@@ -1,0 +1,6 @@
+forecasting-tools==0.3.4
+ddgs==9.16.0
+python-dotenv==1.2.4
+requests==2.34.2
+cryptography==46.0.6
+pytest==9.1.1

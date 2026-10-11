@@ -1,0 +1,24 @@
+{
+  "version": "free-baseline-0.1",
+  "spending_ceiling_usd": 0,
+  "registration_confirmed": true,
+  "live_enabled": false,
+  "expected_bot_user_id": 310267,
+  "season_project": 33121,
+  "practice_project": 32977,
+  "models": [
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "google/gemma-4-31b-it:free"
+  ],
+  "samples_per_question": 2,
+  "max_calls_per_question": 3,
+  "max_calls_per_day": 40,
+  "max_output_tokens": 4096,
+  "model_timeout_seconds": 150,
+  "question_budget_seconds": 480,
+  "deadline_reserve_seconds": 300,
+  "max_questions_per_run": 10,
+  "search_results_per_query": 4,
+  "max_pages_to_fetch": 3,
+  "state_dir": "state"
+}

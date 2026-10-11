@@ -1,0 +1,50 @@
+name: FutureEval bot
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Operation to run
+        type: choice
+        options: [doctor, practice, live]
+        default: doctor
+  schedule:
+    - cron: '7,27,47 * * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: futureeval-bot-single-worker
+  cancel-in-progress: false
+
+jobs:
+  forecast:
+    if: github.event_name == 'workflow_dispatch' || vars.FUTUREEVAL_SCHEDULE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      GITHUB_TOKEN: ${{ github.token }}
+      LITELLM_LOCAL_MODEL_COST_MAP: 'True'
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pinned direct dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Verify reliability for this source and configuration
+        run: python scripts/verify.py
+      - name: Restore encrypted durable progress
+        run: python -m futureeval_bot.cloud restore
+      - name: Record current verification
+        run: python -m futureeval_bot record-offline-checks
+      - name: Run selected operation
+        env:
+          REQUESTED_MODE: ${{ inputs.mode || 'live' }}
+        run: python -m futureeval_bot "$REQUESTED_MODE" --max-questions 5

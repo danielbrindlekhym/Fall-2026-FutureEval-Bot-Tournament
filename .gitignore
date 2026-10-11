@@ -1,0 +1,15 @@
+# Local credentials
+.env
+.env.*
+!.env.example
+
+# Runtime data and local tools
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+state/
+work/
+*.db
+*.db-journal
+*.enc
