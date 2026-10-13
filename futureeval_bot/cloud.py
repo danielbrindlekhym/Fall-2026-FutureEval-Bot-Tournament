@@ -20,6 +20,10 @@ VOLATILE = {'service_checks', 'last_run', 'full_feed_reconciled'}
 MAX_ENCRYPTED_BYTES = 5_000_000
 
 
+class CheckpointConflict(RuntimeError):
+    """A rejected compare-and-swap write; never permission to overwrite progress."""
+
+
 def cipher(token: str) -> Fernet:
     if len(token) < 20:
         raise ValueError('A valid private Metaculus token is required for checkpoint encryption')
@@ -79,12 +83,15 @@ class CloudState:
             'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2026-03-10'})
         self.sha = None
         self.last_signature = None
+        self.conflict_halted = False
 
     def request(self, method, path, **kwargs):
         try:
             response = self.session.request(method, self.base + path, timeout=25, **kwargs)
         except requests.RequestException:
             raise RuntimeError('Durable checkpoint connection failed; operation stopped') from None
+        if response.status_code == 409 and method == 'PUT' and path == '/contents/' + FILE:
+            raise CheckpointConflict('Durable checkpoint returned HTTP 409; reconcile before retry')
         if not response.ok:
             raise RuntimeError('Durable checkpoint returned HTTP ' + str(response.status_code) + '; operation stopped')
         return response.json()
@@ -117,14 +124,39 @@ class CloudState:
         state.checkpoint = self.save
 
     def save(self, state):
+        if self.conflict_halted:
+            raise RuntimeError('Unresolved checkpoint conflict; restore before further writes')
         current = signature(state.db)
         if current == self.last_signature:
             return
         encrypted = seal(snapshot(state.db), self.metaculus_token)
-        result = self.request('PUT', '/contents/' + FILE, json={'message':'Save encrypted forecasting progress',
-            'branch':BRANCH, 'sha':self.sha, 'content':base64.b64encode(encrypted).decode()})
+        body = {'message':'Save encrypted forecasting progress',
+            'branch':BRANCH, 'sha':self.sha, 'content':base64.b64encode(encrypted).decode()}
+        try:
+            result = self.request('PUT', '/contents/' + FILE, json=body)
+        except CheckpointConflict:
+            # Latch before any reread: callers can attempt to checkpoint their
+            # error handler, which must never turn uncertainty into another PUT.
+            self.conflict_halted = True
+            remote = sqlite3.connect(':memory:')
+            try:
+                remote.deserialize(self.read())
+                observed = signature(remote)
+            finally:
+                remote.close()
+            if observed == current:
+                # The intended durable state is already present. No second PUT.
+                self.last_signature = current
+                self.conflict_halted = False
+                return
+            if observed != self.last_signature:
+                raise RuntimeError('Remote progress changed during checkpoint conflict; restore before forecasting')
+            # Exactly one new CAS, using the same frozen encrypted bytes. A new
+            # conflict, unreadable state or transport error leaves the latch set.
+            result = self.request('PUT', '/contents/' + FILE, json={**body, 'sha':self.sha})
         self.sha = result['content']['sha']
         self.last_signature = current
+        self.conflict_halted = False
 
 
 def configured_cloud():
