@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 from .api import FreeModel, Metaculus, ServiceError, reconcile_and_submit
 from .core import SUPPORTED, Config, Contract, State, canonical, run_lock, source_hashes, timestamp, utcnow
-from .forecast import prepare
+from .forecast import NoValidatedForecast, prepare
 from .research import research
 from .cloud import configured_cloud
 
@@ -127,7 +127,10 @@ def run(config: Config, state: State, remote, model, *, practice=False, max_ques
                 model.config = previous_config
             # No raw model answer or source text goes to workflow logs.
             state.update(contract.question_id, error=type(error).__name__ + ": " + str(error)[:220])
-            failures.append({"question_id": contract.question_id, "error_type": type(error).__name__})
+            failure = {"question_id": contract.question_id, "error_type": type(error).__name__}
+            if isinstance(error, NoValidatedForecast):
+                failure["diagnostics"] = error.diagnostics
+            failures.append(failure)
         print(canonical({"question_id": contract.question_id, "phase": state.job(contract.question_id)["phase"]}), flush=True)
 
     if practice:

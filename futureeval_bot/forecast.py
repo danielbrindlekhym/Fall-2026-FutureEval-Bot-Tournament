@@ -11,6 +11,49 @@ import time
 from .core import Config, Contract, State, canonical, finite_probability, utcnow
 
 
+class NoValidatedForecast(ValueError):
+    """Operational diagnostics contain counts and fixed categories, never model text."""
+
+    def __init__(self, diagnostics: dict):
+        super().__init__("No validated model forecast within time/call allowance")
+        self.diagnostics = diagnostics
+
+
+def failure_category(error: Exception, stage: str) -> str:
+    if stage == "validation":
+        if isinstance(error, json.JSONDecodeError):
+            return "invalid_json"
+        if isinstance(error, KeyError):
+            return "missing_field"
+        if isinstance(error, (TypeError, IndexError)):
+            return "invalid_structure"
+        return {
+            "Provider returned an error instead of a forecast": "provider_error_response",
+            "Model returned no JSON forecast": "missing_json",
+            "Missing substantive reasoning": "missing_required_reasoning",
+            "Multiple-choice option labels do not match": "option_labels_mismatch",
+            "Multiple-choice probabilities do not sum to one": "probability_sum_invalid",
+            "Unsupported number of options": "unsupported_option_count",
+            "The six requested percentiles are required": "percentile_schema_invalid",
+            "Numeric quantiles must be finite numbers": "nonfinite_quantile",
+            "Probability must be a number": "nonnumeric_probability",
+            "Probability outside valid bounds": "probability_out_of_bounds",
+            "Unexpected binary payload": "payload_schema_invalid",
+            "Wrong option set": "option_labels_mismatch",
+            "Multiple-choice payload is not normalized": "probability_sum_invalid",
+            "CDF length does not match question metadata": "cdf_length_invalid",
+            "CDF is not monotonic": "cdf_not_monotonic",
+            "Closed lower tail must be zero": "cdf_lower_tail_invalid",
+            "Closed upper tail must be one": "cdf_upper_tail_invalid",
+            "CDF exceeds the per-bin probability cap": "cdf_bin_cap_exceeded",
+        }.get(str(error), "validation_rejected")
+    if str(error) == "Free call allowance exhausted; waiting for a later eligible run":
+        return "call_allowance_exhausted"
+    if str(error) == "Free model transport failed; call reservation retained":
+        return "transport_unconfirmed"
+    return "request_failed"
+
+
 def prompt_for(contract: Contract, evidence: dict, sample: int) -> str:
     view = contract.as_dict()
     view["scaling"] = {k: v for k, v in contract.scaling.items() if k != "continuous_range"}
@@ -146,6 +189,7 @@ def prepare(state: State, contract: Contract, config: Config, model, evidence: d
     valid = []
     attempted = set()
     errors = []
+    validation_failures, request_failures = {}, {}
     # Reparse persisted model responses first; a crash must not erase usable samples.
     def consume_calls():
         for call in state.completed_calls(contract.question_id):
@@ -158,6 +202,8 @@ def prepare(state: State, contract: Contract, config: Config, model, evidence: d
                 payload, reason = parse_sample(contract, json.loads(call["response"]))
                 valid.append({"payload": payload, "reasoning": reason, "model": call["model"], "call_id": call["id"]})
             except (ValueError, KeyError, TypeError, IndexError) as error:
+                code = failure_category(error, "validation")
+                validation_failures[code] = validation_failures.get(code, 0) + 1
                 errors.append(type(error).__name__ + ": " + str(error)[:180])
     consume_calls()
     while len(valid) < config.samples_per_question and time.monotonic() + 20 < stop_at:
@@ -168,6 +214,8 @@ def prepare(state: State, contract: Contract, config: Config, model, evidence: d
                 prompt += "\nPrevious automatic formatting validation failed: " + errors[-1] + ". Produce valid JSON and obey the specified format."
             model.complete(contract.question_id, prompt, index, timeout=stop_at - time.monotonic())
         except Exception as error:
+            code = failure_category(error, "request")
+            request_failures[code] = request_failures.get(code, 0) + 1
             errors.append(type(error).__name__ + ": " + str(error)[:180])
             # The call budget is enforced in persistent storage, including uncertain calls.
             if "allowance exhausted" in str(error) or state.meta("cost_guard_halt"):
@@ -176,7 +224,9 @@ def prepare(state: State, contract: Contract, config: Config, model, evidence: d
         if len(errors) >= config.max_calls_per_question + 1:
             break
     if not valid:
-        raise ValueError("No validated model forecast within time/call allowance")
+        raise NoValidatedForecast({"validation_failures": validation_failures,
+            "request_failures": request_failures, "reserved_calls": state.call_count(contract.question_id),
+            "cost_guard_halted": bool(state.meta("cost_guard_halt"))})
     payload = aggregate(contract, [sample["payload"] for sample in valid])
     marker_hash = hashlib.sha256((str(contract.question_id) + canonical(payload)).encode()).hexdigest()[:20]
     marker = "FutureEval submission " + marker_hash
