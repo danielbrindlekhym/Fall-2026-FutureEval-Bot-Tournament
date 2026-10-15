@@ -144,6 +144,7 @@ class State:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.checkpoint = None
+        self.cost_receipt_halted = False
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.path, timeout=30)
         self.db.row_factory = sqlite3.Row
@@ -208,7 +209,9 @@ class State:
                 (*values.values(), question_id))
         self.persist()
 
-    def reserve_call(self, question_id: int, model: str, config: Config) -> int:
+    def reserve_call(self, question_id: int, model: str, config: Config, *, cost_receipt_guard=False) -> int:
+        if cost_receipt_guard and (self.cost_receipt_halted or self.meta("cost_guard_halt")):
+            raise RuntimeError("Cost receipt guard is halted pending an audit")
         day = utcnow().date().isoformat()
         with self.db:
             daily = self.db.execute("SELECT COUNT(*) FROM calls WHERE day=?", (day,)).fetchone()[0]
@@ -218,13 +221,38 @@ class State:
             cursor = self.db.execute("INSERT INTO calls(question_id,day,model,status,created) VALUES(?,?,?,?,?)",
                 (question_id, day, model, "started", utcnow().isoformat()))
             call_id = cursor.lastrowid
+            if cost_receipt_guard:
+                self.db.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", ("cost_guard_halt", canonical(
+                    {"call_id": call_id, "reason": "pending_zero_cost_receipt", "at": utcnow().isoformat()})))
+        if cost_receipt_guard:
+            self.cost_receipt_halted = True
         self.persist()  # A reservation must be durable before the external model call.
         return call_id
 
-    def finish_call(self, call_id: int, response: dict, cost: float | None):
+    def _check_cost_receipt_guard(self, call_id: int):
+        guard = self.meta("cost_guard_halt")
+        if not isinstance(guard, dict) or guard.get("call_id") != call_id or guard.get("reason") != "pending_zero_cost_receipt":
+            raise RuntimeError("Cost receipt guard changed; audit before further calls")
+
+    def release_cost_receipt_guard(self, call_id: int):
+        # Only the same newly reserved request may release its marker after a
+        # handled completion transport/non-OK failure. Its reservation remains.
+        self._check_cost_receipt_guard(call_id)
+        with self.db:
+            self.db.execute("DELETE FROM meta WHERE key='cost_guard_halt'")
+        self.persist()
+        self.cost_receipt_halted = False
+
+    def finish_call(self, call_id: int, response: dict, cost: float | None, *, cost_receipt_guard=False):
+        if cost_receipt_guard:
+            self._check_cost_receipt_guard(call_id)
         with self.db:
             self.db.execute("UPDATE calls SET status='done',response=?,cost=? WHERE id=?", (canonical(response), cost, call_id))
+            if cost_receipt_guard and cost == 0:
+                self.db.execute("DELETE FROM meta WHERE key='cost_guard_halt'")
         self.persist()
+        if cost_receipt_guard and cost == 0:
+            self.cost_receipt_halted = False
 
     def completed_calls(self, question_id: int) -> list[dict]:
         rows = self.db.execute("SELECT * FROM calls WHERE question_id=? AND status='done' ORDER BY id", (question_id,))
