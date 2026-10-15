@@ -201,7 +201,7 @@ def prepare(state: State, contract: Contract, config: Config, model, evidence: d
             try:
                 payload, reason = parse_sample(contract, json.loads(call["response"]))
                 valid.append({"payload": payload, "reasoning": reason, "model": call["model"], "call_id": call["id"]})
-            except (ValueError, KeyError, TypeError, IndexError) as error:
+            except (ValueError, KeyError, TypeError, IndexError, OverflowError) as error:
                 code = failure_category(error, "validation")
                 validation_failures[code] = validation_failures.get(code, 0) + 1
                 errors.append(type(error).__name__ + ": " + str(error)[:180])
@@ -235,3 +235,4 @@ def prepare(state: State, contract: Contract, config: Config, model, evidence: d
     explanation = f"{marker}\n\nConfiguration: {config.version} / {config.fingerprint}\nGenerated: {utcnow().isoformat()}\n\nFinal forecast payload:\n{canonical(payload)}\n\n{reasoning}\n\nEvidence sources:\n{source_list}\n\nResearch limitations: {evidence.get('limitations', '')}\nMethod: arithmetic pooling of {len(valid)} validated independent samples."
     state.update(contract.question_id, payload=canonical(payload), explanation=explanation,
         samples=canonical(valid), phase="prepared", error=None)
+
