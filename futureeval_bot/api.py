@@ -65,11 +65,13 @@ class Metaculus:
         if statuses:
             params["statuses"] = statuses
         posts = []
+        self.feed_pages = []
         for page in range(30):
             data = self.request("GET", "/posts/", params=params)
             results = data.get("results")
             if not isinstance(results, list):
                 raise ServiceError("Unexpected posts response")
+            self.feed_pages.append({"offset":params["offset"], "count":len(results), "has_next":bool(data.get("next"))})
             posts.extend(results)
             if not data.get("next") or not results:
                 return posts

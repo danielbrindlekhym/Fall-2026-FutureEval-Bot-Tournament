@@ -16,7 +16,8 @@ from .core import canonical
 
 BRANCH = 'bot-state'
 FILE = 'progress.enc'
-VOLATILE = {'service_checks', 'last_run', 'full_feed_reconciled'}
+# Release inventory is durable evidence; deduplication must include its snapshot.
+VOLATILE = {'service_checks', 'last_run'}
 MAX_ENCRYPTED_BYTES = 5_000_000
 
 

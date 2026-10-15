@@ -15,6 +15,7 @@ from .core import SUPPORTED, Config, Contract, State, canonical, run_lock, sourc
 from .forecast import NoValidatedForecast, prepare
 from .research import research
 from .cloud import configured_cloud
+from .inventory import release_inventory, inventory_counts
 
 
 def services(config: Config, state: State):
@@ -50,6 +51,7 @@ def run(config: Config, state: State, remote, model, *, practice=False, max_ques
         live_gate(config, state)
     # Reconcile the whole feed, including closed questions missed during downtime.
     posts = remote.posts(project)
+    feed_checked_at = utcnow().isoformat()
     contracts, skipped = {}, 0
     for post in posts:
         q = post.get("question") or {}
@@ -136,10 +138,26 @@ def run(config: Config, state: State, remote, model, *, practice=False, max_ques
     if practice:
         verified_formats = {Contract(**json.loads(job["contract"])).kind for job in state.jobs(project) if job["phase"] == "verified"}
         state.set_meta("practice_verified_formats", sorted(verified_formats))
-    state.set_meta('full_feed_reconciled', {'at': utcnow().isoformat(), 'project': project, 'posts': len(posts)})
+    previous_feed = state.meta('full_feed_reconciled', {})
+    try:
+        if not isinstance(previous_feed, dict) or not isinstance(previous_feed.get('release_inventories', {}), dict):
+            raise ValueError('Saved release inventory container changed')
+        inventories = dict(previous_feed.get('release_inventories', {}))
+        inventory = release_inventory(posts, getattr(remote, 'feed_pages', []), feed_checked_at, inventories.get(str(project)))
+        export_counts = inventory_counts(inventory)
+    except ValueError:
+        # Optional telemetry must not halt forecasting or overwrite evidence needing review.
+        export_counts = {'status':'unavailable', 'reason':'metadata_validation_failed',
+            'complete_official_released_inventory':False}
+    else:
+        inventories[str(project)] = inventory
+        # Durable writes remain outside the optional-validation exception handler.
+        state.set_meta('full_feed_reconciled', {'at': utcnow().isoformat(), 'project': project,
+            'posts': len(posts), 'release_inventories': inventories})
     state.set_meta("last_run", {"at": utcnow().isoformat(), "project": project, "config": config.fingerprint,
         "failures": failures, "questions_considered": attempted, "unsupported_posts": skipped})
     result = state.summary(project)
+    result["release_inventory_counts"] = export_counts
     result["failures"] = failures
     result["practice_verified_formats"] = state.meta("practice_verified_formats", [])
     return result
