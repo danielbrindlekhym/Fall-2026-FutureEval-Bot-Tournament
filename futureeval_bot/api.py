@@ -191,6 +191,31 @@ def zero_priced(model: dict) -> bool:
         return False
 
 
+def preflight_get(get, url: str):
+    """At most one transient retry for read-only OpenRouter preflight metadata."""
+    for attempt in range(2):
+        try:
+            response = get(url, timeout=25, allow_redirects=False)
+        except requests.exceptions.SSLError:
+            raise ServiceError("OpenRouter preflight certificate verification failed") from None
+        except (requests.Timeout, requests.ConnectionError):
+            if attempt:
+                raise ServiceError("OpenRouter preflight transport failed after one bounded retry") from None
+            time.sleep(1)
+            continue
+        if attempt or response.status_code not in (429, 502, 503, 504):
+            return response
+        raw_delay = response.headers.get("Retry-After")
+        try:
+            delay = float(raw_delay) if raw_delay is not None else 1.0
+        except (TypeError, ValueError):
+            return response
+        if not math.isfinite(delay) or not 0 <= delay <= 5:
+            return response  # Do not ignore a longer cooldown or malformed server hint.
+        time.sleep(delay)
+    raise AssertionError("Bounded preflight loop exhausted unexpectedly")
+
+
 class FreeModel:
     BASE = "https://openrouter.ai/api/v1"
 
@@ -203,11 +228,11 @@ class FreeModel:
         self.catalog = None
 
     def check(self) -> dict:
-        response = self.session.get(self.BASE + "/key", timeout=25)
+        response = preflight_get(self.session.get, self.BASE + "/key")
         if not response.ok:
             raise ServiceError(f"OpenRouter key check returned HTTP {response.status_code}")
         data = response.json()["data"]
-        models = requests.get(self.BASE + "/models", timeout=25)
+        models = preflight_get(requests.get, self.BASE + "/models")
         if not models.ok:
             raise ServiceError("Unable to verify free-model pricing")
         self.catalog = {m["id"]: m for m in models.json()["data"] if zero_priced(m)}
