@@ -98,13 +98,39 @@ class CloudState:
         return response.json()
 
     def read(self) -> bytes:
-        item = self.request('GET', '/contents/' + FILE, params={'ref': BRANCH})
-        self.sha = item['sha']
-        if item.get('encoding') != 'base64':
-            item = self.request('GET', '/git/blobs/' + self.sha)
-        if item.get('encoding') != 'base64':
-            raise RuntimeError('Unsupported checkpoint encoding')
-        return unseal(base64.b64decode(item['content']), self.metaculus_token)
+        # Resolve twice around an immutable tree/blob read. Equal observations
+        # bound this read; they do not prove globally fresh GitHub replicas.
+        def identity(value):
+            if not isinstance(value, str) or len(value) != 40 or any(c not in '0123456789abcdef' for c in value):
+                raise RuntimeError('Checkpoint identity unverified')
+            return value
+        head = identity(self.request('GET', '/git/ref/heads/' + BRANCH)['object']['sha'])
+        commit = self.request('GET', '/git/commits/' + head)
+        if identity(commit['sha']) != head:
+            raise RuntimeError('Checkpoint commit identity mismatch')
+        tree_sha = identity(commit['tree']['sha'])
+        tree = self.request('GET', '/git/trees/' + tree_sha)
+        if identity(tree['sha']) != tree_sha or tree.get('truncated') is not False:
+            raise RuntimeError('Checkpoint tree identity unverified')
+        entries = [x for x in tree['tree'] if x.get('path') == FILE and x.get('type') == 'blob']
+        if len(entries) != 1:
+            raise RuntimeError('Checkpoint blob identity unverified')
+        blob_sha = identity(entries[0]['sha'])
+        item = self.request('GET', '/git/blobs/' + blob_sha)
+        if identity(item['sha']) != blob_sha or item.get('encoding') != 'base64':
+            raise RuntimeError('Checkpoint blob identity mismatch')
+        encrypted = base64.b64decode(item['content'], validate=False)
+        observed = hashlib.sha1(b'blob ' + str(len(encrypted)).encode() + bytes([0]) + encrypted).hexdigest()
+        if observed != blob_sha:
+            raise RuntimeError('Checkpoint blob content mismatch')
+        data = unseal(encrypted, self.metaculus_token)
+        after = identity(self.request('GET', '/git/ref/heads/' + BRANCH)['object']['sha'])
+        if after != head:
+            raise RuntimeError('Checkpoint head changed during read')
+        self.sha = blob_sha
+        self.read_commit = head
+        print(canonical({'checkpoint_read_commit': head, 'checkpoint_read_blob': blob_sha}), flush=True)
+        return data
 
     def restore(self, destination: Path):
         data = self.read()  # Missing/corrupt state fails closed; never silently start over.
@@ -121,6 +147,7 @@ class CloudState:
         finally:
             remote.close()
         if self.last_signature != signature(state.db):
+            print(canonical({'checkpoint_comparison':'durable_signature_mismatch'}), flush=True)
             raise RuntimeError('Local and remote progress disagree; restore before forecasting')
         state.checkpoint = self.save
 

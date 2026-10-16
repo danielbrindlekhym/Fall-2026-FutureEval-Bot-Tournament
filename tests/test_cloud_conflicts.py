@@ -44,6 +44,16 @@ class Response:
 def server(monkeypatch, cloud, remote_bytes, *, second_status=200, get_error=None):
     writes, reads = [], []
 
+    # Conflict policy tests inject at the authenticated-read boundary. Exact
+    # immutable HTTP/tree/blob validation is covered by test_immutable_read.
+    def authenticated_read():
+        reads.append({'params': {'ref': 'bot-state'}})
+        if get_error:
+            raise RuntimeError('Durable checkpoint connection failed; operation stopped')
+        cloud.sha = 'fresh-blob'
+        return candidate.unseal(candidate.seal(remote_bytes, TOKEN), TOKEN)
+    monkeypatch.setattr(cloud, 'read', authenticated_read)
+
     def request(method, url, **kwargs):
         assert url == cloud.base + '/contents/progress.enc'
         if method == 'GET':
