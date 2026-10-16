@@ -104,3 +104,37 @@ def test_persistence_failure_is_outside_validation_catch(env, monkeypatch, excep
     assert actual['status'] == exception.__name__
     assert actual['fake_model_calls'] == 0
 
+
+def with_probabilities(probabilities):
+    good = response('multiple_choice')
+    data = json.loads(good['choices'][0]['message']['content'])
+    data['probabilities'] = probabilities
+    good['choices'][0]['message']['content'] = json.dumps(data)
+    return good
+
+
+@pytest.mark.parametrize('shape', [['A', 'B'], 'AB'])
+def test_container_rejection_preserves_valid_cached_samples(env, shape):
+    good = response('multiple_choice')
+    normal = run(env, 'multiple_choice', [good, good])
+    actual = run(env, 'multiple_choice', [with_probabilities(shape), good, good])
+    assert actual['status'] == 'prepared'
+    assert actual['payload'] == normal['payload']
+    assert actual['valid_samples'] == 2 and actual['reserved'] == 3
+    assert actual['fake_model_calls'] == 0
+
+
+@pytest.mark.parametrize('shape', [['A', 'B'], 'AB'])
+def test_all_invalid_containers_fail_closed(env, shape):
+    actual = run(env, 'multiple_choice', [with_probabilities(shape)] * 3)
+    assert actual['status'] == 'NoValidatedForecast'
+    assert actual['diagnostics']['validation_failures'] == {'invalid_structure': 3}
+    assert actual['reserved'] == 3 and actual['fake_model_calls'] == 0
+
+
+@pytest.mark.parametrize('probabilities', [{'A': 0.4, 'B': 0.6}, {'A': '0.4', 'B': '0.6'}])
+def test_supported_objects_remain_identical(env, probabilities):
+    expected = run(env, 'multiple_choice', [response('multiple_choice')] * 2)
+    actual = run(env, 'multiple_choice', [with_probabilities(probabilities)] * 2)
+    assert actual == expected
+

@@ -111,6 +111,8 @@ def parse_sample(contract: Contract, data: dict) -> tuple[dict, str]:
         payload = {"probability_yes": min(0.999, max(0.001, p))}
     elif contract.kind == "multiple_choice":
         probabilities = raw["probabilities"]
+        if not isinstance(probabilities, dict):
+            raise TypeError("Multiple-choice probabilities must be an object")
         if set(probabilities) != set(contract.options):
             raise ValueError("Multiple-choice option labels do not match")
         # Some providers quote JSON decimals. Interpret only plain decimal literals,
