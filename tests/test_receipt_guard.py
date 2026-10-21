@@ -63,7 +63,7 @@ def state(tmp_path):
 
 def blocked_next(state, session):
     with pytest.raises((ServiceError, RuntimeError)):
-        model(state, session).complete(99, 'synthetic', 0, 10)
+        model(state, session).complete(99, 'synthetic', 0, 30)
     assert session.posts == 1
     assert state.call_count(99) == 0
 
@@ -76,7 +76,7 @@ def test_invalid_cost_never_allows_another_post(state, bad, inline):
     if inline and bad is None:
         session.receipt = reply({'data': {}})
     with pytest.raises(ServiceError) as caught:
-        model(state, session).complete(1, 'synthetic', 0, 10)
+        model(state, session).complete(1, 'synthetic', 0, 30)
     assert PRIVATE not in str(caught.value) and 'private-bad-cost' not in str(caught.value)
     assert state.call_count(1) == 1 and state.meta('cost_guard_halt')
     json.dumps(state.meta('cost_guard_halt'), allow_nan=False)
@@ -88,7 +88,7 @@ def test_invalid_cost_never_allows_another_post(state, bad, inline):
 def test_receipt_failures_halt_and_survive_sqlite_restart(state, receipt):
     session = Session(completion(), receipt)
     with pytest.raises(ServiceError) as caught:
-        model(state, session).complete(1, 'synthetic', 0, 10)
+        model(state, session).complete(1, 'synthetic', 0, 30)
     assert PRIVATE not in str(caught.value)
     reopened = State(state.path)
     try:
@@ -102,7 +102,7 @@ def test_receipt_failures_halt_and_survive_sqlite_restart(state, receipt):
 def test_malformed_completion_body_is_halted(state, response):
     session = Session(response)
     with pytest.raises(ServiceError) as caught:
-        model(state, session).complete(1, 'synthetic', 0, 10)
+        model(state, session).complete(1, 'synthetic', 0, 30)
     assert PRIVATE not in str(caught.value)
     blocked_next(state, session)
 
@@ -115,7 +115,7 @@ def test_confirmed_zero_clears_guard_only_with_saved_response(state, cost, inlin
     session = Session(completion(cost) if inline else completion(), reply({'data': {'total_cost': cost}}))
     m = model(state, session)
     for index in range(2):
-        assert m.complete(1, 'synthetic', index, 10)['usage'] is not None
+        assert m.complete(1, 'synthetic', index, 30)['usage'] is not None
     assert session.posts == 2 and session.gets == (0 if inline else 2)
     assert state.call_count(1) == 2 and state.meta('cost_guard_halt') is None
     assert not state.cost_receipt_halted
@@ -138,7 +138,7 @@ def test_handled_completion_transport_policy_is_preserved(state, completion_fail
     m = model(state, session)
     for index in range(2):
         with pytest.raises(ServiceError):
-            m.complete(1, 'synthetic', index, 10)
+            m.complete(1, 'synthetic', index, 30)
     assert session.posts == 2 and state.call_count(1) == 2
     assert not state.meta('cost_guard_halt') and not state.cost_receipt_halted
     assert state.summary()['calls_without_cost_receipt'] == 2
@@ -147,7 +147,7 @@ def test_handled_completion_transport_policy_is_preserved(state, completion_fail
 def test_interrupted_request_keeps_prospective_marker_on_restart(state):
     session = Session(KeyboardInterrupt())
     with pytest.raises(KeyboardInterrupt):
-        model(state, session).complete(1, 'synthetic', 0, 10)
+        model(state, session).complete(1, 'synthetic', 0, 30)
     reopened = State(state.path)
     try:
         blocked_next(reopened, session)
@@ -161,7 +161,7 @@ def test_reservation_checkpoint_failure_prevents_send(state):
     state.checkpoint = fail
     session = Session(completion(0))
     with pytest.raises(RuntimeError):
-        model(state, session).complete(1, 'synthetic', 0, 10)
+        model(state, session).complete(1, 'synthetic', 0, 30)
     assert session.posts == 0 and state.call_count(1) == 1
     assert state.meta('cost_guard_halt') and state.cost_receipt_halted
 
@@ -175,7 +175,7 @@ def test_failed_zero_receipt_checkpoint_blocks_new_instance_and_durable_restart(
     state.checkpoint = checkpoint
     session = Session(completion(0))
     with pytest.raises(RuntimeError):
-        model(state, session).complete(1, 'synthetic', 0, 10)
+        model(state, session).complete(1, 'synthetic', 0, 30)
     assert state.cost_receipt_halted
     blocked_next(state, session)
     restored = State(tmp_path / 'durable-restart.db')
@@ -193,7 +193,7 @@ def test_sqlite_response_write_failure_keeps_pending_guard(state):
     state.db.set_authorizer(authorize)
     session = Session(completion(0))
     with pytest.raises(sqlite3.DatabaseError):
-        model(state, session).complete(1, 'synthetic', 0, 10)
+        model(state, session).complete(1, 'synthetic', 0, 30)
     assert state.meta('cost_guard_halt')
     blocked_next(state, session)
 
@@ -202,7 +202,7 @@ def test_existing_operator_halt_is_never_cleared(state):
     state.set_meta('cost_guard_halt', {'reason': 'operator-review', 'call_id': 5})
     session = Session(completion(0))
     with pytest.raises(ServiceError):
-        model(state, session).complete(1, 'synthetic', 0, 10)
+        model(state, session).complete(1, 'synthetic', 0, 30)
     with pytest.raises(RuntimeError):
         state.release_cost_receipt_guard(5)
     assert session.posts == 0 and state.meta('cost_guard_halt')['reason'] == 'operator-review'
@@ -212,9 +212,9 @@ def test_call_limits_unchanged(state):
     session = Session(completion(0))
     m = model(state, session)
     for index in range(3):
-        m.complete(1, 'synthetic', index, 10)
+        m.complete(1, 'synthetic', index, 30)
     with pytest.raises(RuntimeError, match='allowance exhausted'):
-        m.complete(1, 'synthetic', 0, 10)
+        m.complete(1, 'synthetic', 0, 30)
     assert session.posts == 3 and state.call_count(1) == 3
 
 
@@ -222,7 +222,7 @@ def test_historical_uncertain_reservations_are_retained_without_reinterpretation
     config = Config(models=['test/model:free'])
     old = state.reserve_call(7, 'test/model:free', config)
     session = Session(completion(0))
-    model(state, session).complete(1, 'synthetic', 0, 10)
+    model(state, session).complete(1, 'synthetic', 0, 30)
     row = state.db.execute('SELECT status,cost FROM calls WHERE id=?', (old,)).fetchone()
     assert tuple(row) == ('started', None)
     assert state.summary()['reserved_model_calls'] == 2
@@ -236,7 +236,7 @@ def test_daily_call_limit_counts_old_uncertainty(state):
         state.reserve_call(i, 'test/model:free', config)
     session = Session(completion(0))
     with pytest.raises(RuntimeError, match='allowance exhausted'):
-        model(state, session).complete(99, 'synthetic', 0, 10)
+        model(state, session).complete(99, 'synthetic', 0, 30)
     assert session.posts == 0 and state.summary()['reserved_model_calls'] == 40
 
 
@@ -244,7 +244,7 @@ def test_reservation_transaction_failure_never_sends(state):
     state.db.execute("CREATE TRIGGER fail_receipt_marker BEFORE INSERT ON meta BEGIN SELECT RAISE(ABORT, 'synthetic write failure'); END")
     session = Session(completion(0))
     with pytest.raises(sqlite3.DatabaseError):
-        model(state, session).complete(1, 'synthetic', 0, 10)
+        model(state, session).complete(1, 'synthetic', 0, 30)
     assert session.posts == 0 and state.call_count(1) == 0
 
 
@@ -257,7 +257,7 @@ def test_transport_guard_release_checkpoint_failure_stays_halted(state):
     state.checkpoint = checkpoint
     session = Session(requests.Timeout(PRIVATE))
     with pytest.raises(RuntimeError):
-        model(state, session).complete(1, 'synthetic', 0, 10)
+        model(state, session).complete(1, 'synthetic', 0, 30)
     assert state.cost_receipt_halted and state.call_count(1) == 1
     blocked_next(state, session)
 
@@ -267,7 +267,7 @@ def test_unserializable_success_response_keeps_durable_guard(state):
     data['synthetic_invalid_field'] = float('nan')
     session = Session(reply(data))
     with pytest.raises(ServiceError):
-        model(state, session).complete(1, 'synthetic', 0, 10)
+        model(state, session).complete(1, 'synthetic', 0, 30)
     assert state.meta('cost_guard_halt')
     blocked_next(state, session)
 
@@ -281,7 +281,7 @@ def test_uncertain_checkpoint_that_applied_zero_record_is_safe_after_restore(sta
     state.checkpoint = checkpoint
     session = Session(completion(0))
     with pytest.raises(RuntimeError):
-        model(state, session).complete(1, 'synthetic', 0, 10)
+        model(state, session).complete(1, 'synthetic', 0, 30)
     blocked_next(state, session)
     restored = State(tmp_path / 'applied-restart.db')
     restored.db.deserialize(saves[-1])

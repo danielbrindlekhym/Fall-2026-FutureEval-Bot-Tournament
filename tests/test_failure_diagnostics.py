@@ -39,7 +39,7 @@ def test_exhaustion_reports_causes_without_response_content(setup):
     error = caught.value
     assert error.diagnostics == {'validation_failures': {'invalid_json': 2},
         'request_failures': {'transport_unconfirmed': 1, 'call_allowance_exhausted': 1}, 'reserved_calls': 3,
-        'cost_guard_halted': False}
+        'cost_guard_halted': False, 'completion_shapes': {json.dumps({'content_shape':'string','finish_reason':'other_or_absent','prompt_tokens':None,'completion_tokens':None,'total_tokens':None},sort_keys=True):2}}
     assert secret_text not in str(error) + json.dumps(error.diagnostics)
     assert model.sends == 3 and state.call_count(1) == 3
     assert state.job(1)['payload'] is None

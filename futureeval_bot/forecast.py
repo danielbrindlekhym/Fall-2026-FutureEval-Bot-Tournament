@@ -9,6 +9,7 @@ import statistics
 import time
 
 from .core import Config, Contract, State, canonical, finite_probability, utcnow
+from .readiness import ReadinessStopped
 
 
 class NoValidatedForecast(ValueError):
@@ -17,6 +18,26 @@ class NoValidatedForecast(ValueError):
     def __init__(self, diagnostics: dict):
         super().__init__("No validated model forecast within time/call allowance")
         self.diagnostics = diagnostics
+
+
+def completion_shape(data):
+    if not isinstance(data,dict):return {'structure':'invalid'}
+    choices=data.get('choices')
+    choice=choices[0] if isinstance(choices,list) and choices and isinstance(choices[0],dict) else {}
+    message=choice.get('message')
+    message=message if isinstance(message,dict) else {}
+    content=message.get('content')
+    shape=('absent' if 'content' not in message else 'null' if content is None else
+           'empty_string' if isinstance(content,str) and not content else
+           'string' if isinstance(content,str) else 'nonstring')
+    finish=choice.get('finish_reason')
+    if finish not in ('stop','length','content_filter','tool_calls','error'):finish='other_or_absent'
+    usage=data.get('usage');usage=usage if isinstance(usage,dict) else {}
+    result={'content_shape':shape,'finish_reason':finish}
+    for key in ('prompt_tokens','completion_tokens','total_tokens'):
+        value=usage.get(key)
+        result[key]=value if type(value) is int and 0<=value<=100000000 else None
+    return result
 
 
 def failure_category(error: Exception, stage: str) -> str:
@@ -51,6 +72,13 @@ def failure_category(error: Exception, stage: str) -> str:
         return "call_allowance_exhausted"
     if str(error) == "Free model transport failed; call reservation retained":
         return "transport_unconfirmed"
+    # Match only our own fixed HTTP error envelope, never provider response text.
+    match = re.fullmatch(r"Free model returned HTTP ([1-5][0-9]{2}); no paid fallback", str(error))
+    if match:
+        status = int(match.group(1))
+        return {401: "http_authentication", 402: "http_payment_required", 403: "http_forbidden",
+                404: "http_not_found", 408: "http_timeout", 429: "http_rate_limited"}.get(
+                    status, "http_server_error" if status >= 500 else "http_other")
     return "request_failed"
 
 
@@ -192,6 +220,7 @@ def prepare(state: State, contract: Contract, config: Config, model, evidence: d
     attempted = set()
     errors = []
     validation_failures, request_failures = {}, {}
+    completion_shapes = {}
     # Reparse persisted model responses first; a crash must not erase usable samples.
     def consume_calls():
         for call in state.completed_calls(contract.question_id):
@@ -201,7 +230,13 @@ def prepare(state: State, contract: Contract, config: Config, model, evidence: d
             if call["cost"] != 0:
                 continue
             try:
-                payload, reason = parse_sample(contract, json.loads(call["response"]))
+                decoded = json.loads(call["response"])
+                try:
+                    shape = canonical(completion_shape(decoded))
+                    completion_shapes[shape] = completion_shapes.get(shape, 0) + 1
+                except Exception:
+                    pass  # Observability cannot change forecasting or correction prompts.
+                payload, reason = parse_sample(contract, decoded)
                 valid.append({"payload": payload, "reasoning": reason, "model": call["model"], "call_id": call["id"]})
             except (ValueError, KeyError, TypeError, IndexError, OverflowError) as error:
                 code = failure_category(error, "validation")
@@ -215,6 +250,9 @@ def prepare(state: State, contract: Contract, config: Config, model, evidence: d
             if errors:
                 prompt += "\nPrevious automatic formatting validation failed: " + errors[-1] + ". Produce valid JSON and obey the specified format."
             model.complete(contract.question_id, prompt, index, timeout=stop_at - time.monotonic())
+        except ReadinessStopped:
+            request_failures['readiness_stopped'] = request_failures.get('readiness_stopped', 0) + 1
+            break  # No reservation increment: do not refetch through this loop.
         except Exception as error:
             code = failure_category(error, "request")
             request_failures[code] = request_failures.get(code, 0) + 1
@@ -228,7 +266,8 @@ def prepare(state: State, contract: Contract, config: Config, model, evidence: d
     if not valid:
         raise NoValidatedForecast({"validation_failures": validation_failures,
             "request_failures": request_failures, "reserved_calls": state.call_count(contract.question_id),
-            "cost_guard_halted": bool(state.meta("cost_guard_halt"))})
+            "cost_guard_halted": bool(state.meta("cost_guard_halt")),
+            "completion_shapes": completion_shapes})
     payload = aggregate(contract, [sample["payload"] for sample in valid])
     marker_hash = hashlib.sha256((str(contract.question_id) + canonical(payload)).encode()).hexdigest()[:20]
     marker = "FutureEval submission " + marker_hash

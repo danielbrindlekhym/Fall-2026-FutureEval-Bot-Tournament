@@ -263,7 +263,7 @@ def test_free_model_request_cannot_enable_paid_plugins(state):
             assert "models" not in body
             return Reply()
     model.session = Session()
-    model.complete(1, "synthetic", 0, 10)
+    model.complete(1, "synthetic", 0, 30)
     assert state.summary()["reported_model_cost_usd"] == 0
 
 
@@ -280,10 +280,10 @@ def test_nonzero_receipt_halts_future_calls(state):
             return Reply()
     model.session = Session()
     with pytest.raises(ServiceError):
-        model.complete(1, "synthetic", 0, 10)
+        model.complete(1, "synthetic", 0, 30)
     assert state.meta("cost_guard_halt")
     with pytest.raises(ServiceError):
-        model.complete(2, "synthetic", 0, 10)
+        model.complete(2, "synthetic", 0, 30)
 
 
 def test_closed_question_does_not_submit_forecast(state):
