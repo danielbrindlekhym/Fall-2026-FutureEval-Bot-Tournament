@@ -1,0 +1,132 @@
+name: PR9 offline release verification
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+    paths:
+      - '.github/workflows/offline-verification.yml'
+      - 'config.json'
+      - 'requirements.txt'
+      - 'futureeval_bot/**'
+      - 'scripts/verify.py'
+      - 'tests/**'
+
+permissions:
+  contents: read
+
+jobs:
+  verify-pr9:
+    if: github.event.pull_request.number == 9
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      LITELLM_LOCAL_MODEL_COST_MAP: 'True'
+      PYTHONUTF8: '1'
+      EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      EXPECTED_PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - name: Check out exact PR head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Assert exact head, parent, changed path, and reviewed source blobs
+        run: |
+          set -euo pipefail
+          test "$EXPECTED_PR_NUMBER" = "9"
+          actual_head="$(git rev-parse HEAD)"
+          expected_parent="71137170a2ce1200b0ac32883b060c24a3e2e54c"
+          actual_parent="$(git rev-parse HEAD^)"
+          changed_paths="$(git diff-tree --no-commit-id --name-only -r HEAD^ HEAD)"
+          test "$actual_head" = "$EXPECTED_HEAD_SHA"
+          test "$actual_parent" = "$expected_parent"
+          test "$changed_paths" = ".github/workflows/offline-verification.yml"
+          printf 'PR #9 exact head: %s\nParent: %s\nWorkflow run ID: %s\n' "$actual_head" "$actual_parent" "$GITHUB_RUN_ID"
+          {
+            echo "## Run identity"
+            echo "- PR: #9"
+            echo "- Head SHA: $actual_head"
+            echo "- Parent SHA: $actual_parent"
+            echo "- Workflow run ID: $GITHUB_RUN_ID"
+          } >> "$GITHUB_STEP_SUMMARY"
+          check_blob() {
+            expected="$1"
+            path="$2"
+            actual="$(git rev-parse "HEAD:$path")"
+            if [[ "$actual" != "$expected" ]]; then
+              echo "Reviewed blob mismatch for $path: $actual" >&2
+              exit 1
+            fi
+          }
+          check_blob 8da52b76fd78f413a45275cb4f8718df21e33597 futureeval_bot/cloud.py
+          check_blob 304b0096e68309f7c81a8455d0fe39e033802607 futureeval_bot/core.py
+          check_blob e1dbe9e6fc4f5f43dc2587284e9ccd62a703b8eb tests/test_checkpoint_read_stability.py
+          check_blob 4b6b6c95b3f6938f5835bcbad4950eacccaa0101 tests/test_immutable_read.py
+          check_blob b801b66111cb4f6374e402575d142994f7f18a79 requirements.txt
+          check_blob e2c4e8f990e74f816dd230e486eb229c5304acaa config.json
+          check_blob 6e13805047ca875879051a4d552380a787e03847 scripts/verify.py
+          check_blob 984b1179eff6b01dd8e890004472de684f72e408 tests/conftest.py
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+
+      - name: Install pinned direct dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Record Python and resolved package versions
+        run: |
+          {
+            echo "## Runtime and resolved dependencies"
+            echo 'Python:'
+            python --version
+            echo 'pip:'
+            python -m pip --version
+            echo 'pip freeze:'
+            python -m pip freeze
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove stale verifier records
+        run: |
+          rm -f outputs/offline-verification.json work/offline-tests.xml
+          mkdir -p outputs work
+
+      - name: Run complete offline verifier
+        run: python scripts/verify.py
+
+      - name: Validate and retain complete offline-verification.json
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from futureeval_bot.core import Config, source_hashes
+
+          path = Path('outputs/offline-verification.json')
+          if not path.is_file():
+              raise SystemExit('offline-verification.json was not produced')
+          report = json.loads(path.read_text(encoding='utf-8'))
+          summary_path = os.environ['GITHUB_STEP_SUMMARY']
+          with open(summary_path, 'a', encoding='utf-8') as summary:
+              summary.write('## Complete offline-verification.json\\n\\n```json\\n')
+              summary.write(path.read_text(encoding='utf-8'))
+              summary.write('\\n```\\n')
+          if report.get('source_hashes') != source_hashes():
+              raise SystemExit('source_hashes do not match the current checkout')
+          if report.get('config_fingerprint') != Config.load('config.json').fingerprint:
+              raise SystemExit('config_fingerprint does not match the current checkout')
+          checks = report.get('checks')
+          if report.get('passed') is not True:
+              raise SystemExit('offline-verification.json passed is not true')
+          if report.get('test_count') != 215 or not isinstance(checks, list) or len(checks) != 215:
+              raise SystemExit('expected exactly 215 collected tests on this exact tree')
+          if any(not isinstance(item, dict) or item.get('passed') is not True for item in checks):
+              raise SystemExit('one or more collected tests failed, skipped, or are missing')
+          PY
