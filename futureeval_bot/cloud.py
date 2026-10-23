@@ -25,6 +25,10 @@ class CheckpointConflict(RuntimeError):
     """A rejected compare-and-swap write; never permission to overwrite progress."""
 
 
+class CheckpointHeadChanged(RuntimeError):
+    """The branch moved while an immutable checkpoint snapshot was being read."""
+
+
 def cipher(token: str) -> Fernet:
     if len(token) < 20:
         raise ValueError('A valid private Metaculus token is required for checkpoint encryption')
@@ -98,6 +102,18 @@ class CloudState:
         return response.json()
 
     def read(self) -> bytes:
+        # A ref observation can straddle a just-completed checkpoint write. Make
+        # one fresh, complete read; never reuse the earlier blob or relax identity
+        # checks. Repeated movement still fails closed before forecasting.
+        for attempt in range(2):
+            try:
+                return self._read_once()
+            except CheckpointHeadChanged:
+                if attempt == 1:
+                    raise
+        raise AssertionError('unreachable')
+
+    def _read_once(self) -> bytes:
         # Resolve twice around an immutable tree/blob read. Equal observations
         # bound this read; they do not prove globally fresh GitHub replicas.
         def identity(value):
@@ -126,7 +142,7 @@ class CloudState:
         data = unseal(encrypted, self.metaculus_token)
         after = identity(self.request('GET', '/git/ref/heads/' + BRANCH)['object']['sha'])
         if after != head:
-            raise RuntimeError('Checkpoint head changed during read')
+            raise CheckpointHeadChanged('Checkpoint head changed during read')
         self.sha = blob_sha
         self.read_commit = head
         print(canonical({'checkpoint_read_commit': head, 'checkpoint_read_blob': blob_sha}), flush=True)
