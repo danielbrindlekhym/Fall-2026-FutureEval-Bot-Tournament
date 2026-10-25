@@ -299,6 +299,8 @@ def test_submission_reserve_stops_model_calls(state):
     q = contract(close_time=(utcnow() + timedelta(seconds=120)).isoformat())
     class Model:
         config = Config()
+        def rate_limit_circuit_open(self, config=None):
+            return False
         def complete(self, *args, **kwargs):
             raise AssertionError("No model calls inside submission reserve")
     result = run(Config(), state, FakeRemote(q), Model(), practice=True)
