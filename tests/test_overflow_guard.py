@@ -38,6 +38,8 @@ class MemoryState:
         self.saved = fields
 
 class FakeModel:
+    def rate_limit_circuit_open(self, config=None):
+        return False
     def __init__(self, state, kind):
         self.state, self.kind, self.calls = state, kind, 0
     def complete(self, *args, **kwargs):

@@ -229,6 +229,14 @@ class FreeModel:
         self.session = requests.Session()
         self.session.headers.update({"Authorization": f"Bearer {key}", "X-OpenRouter-Title": "FutureEval free baseline"})
         self.catalog = None
+        self._rate_limited_models: set[str] = set()
+        self.rate_limit_circuit_opened = False
+
+    def rate_limit_circuit_open(self, config: Config | None = None) -> bool:
+        if self.catalog is None:
+            return False
+        configured_free = [model for model in (config or self.config).models if model in self.catalog]
+        return bool(configured_free) and all(model in self._rate_limited_models for model in configured_free)
 
     def check(self) -> dict:
         response = preflight_get(self.session.get, self.BASE + "/key")
@@ -250,8 +258,11 @@ class FreeModel:
             raise ServiceError("Cost guard is halted pending an audit")
         if self.catalog is None:
             self.check()
-        available = [m for m in self.config.models if m in self.catalog]
+        available = [m for m in self.config.models if m in self.catalog and m not in self._rate_limited_models]
         if not available:
+            if self.rate_limit_circuit_open():
+                self.rate_limit_circuit_opened = True
+                raise ServiceError("No verified free model remains after rate limiting in this workflow run; no paid fallback")
             raise ServiceError("Free model unavailable; paid fallback is prohibited")
         # Selection-policy candidate: no new model identities or completion retries.
         if self.state.call_count(question_id) >= self.config.max_calls_per_question:
@@ -308,6 +319,10 @@ class FreeModel:
             raise ServiceError("Free model transport failed; call reservation retained") from None
         if not response.ok:
             self.state.release_cost_receipt_guard(call_id)
+            if response.status_code == 429:
+                self._rate_limited_models.add(model)
+                if self.rate_limit_circuit_open():
+                    self.rate_limit_circuit_opened = True
             raise ServiceError(f"Free model returned HTTP {response.status_code}; no paid fallback")
         try:
             data = response.json()

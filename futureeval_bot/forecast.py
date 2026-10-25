@@ -70,6 +70,8 @@ def failure_category(error: Exception, stage: str) -> str:
         }.get(str(error), "validation_rejected")
     if str(error) == "Free call allowance exhausted; waiting for a later eligible run":
         return "call_allowance_exhausted"
+    if str(error) == "No verified free model remains after rate limiting in this workflow run; no paid fallback":
+        return "rate_limit_circuit_open"
     if str(error) == "Free model transport failed; call reservation retained":
         return "transport_unconfirmed"
     # Match only our own fixed HTTP error envelope, never provider response text.
@@ -244,6 +246,10 @@ def prepare(state: State, contract: Contract, config: Config, model, evidence: d
                 errors.append(type(error).__name__ + ": " + str(error)[:180])
     consume_calls()
     while len(valid) < config.samples_per_question and time.monotonic() + 20 < stop_at:
+        if model.rate_limit_circuit_open(config):
+            model.rate_limit_circuit_opened = True
+            request_failures["rate_limit_circuit_open"] = 1
+            break
         index = state.call_count(contract.question_id)
         try:
             prompt = prompt_for(contract, evidence, index)
@@ -259,6 +265,10 @@ def prepare(state: State, contract: Contract, config: Config, model, evidence: d
             errors.append(type(error).__name__ + ": " + str(error)[:180])
             # The call budget is enforced in persistent storage, including uncertain calls.
             if "allowance exhausted" in str(error) or state.meta("cost_guard_halt"):
+                break
+            if model.rate_limit_circuit_open(config):
+                model.rate_limit_circuit_opened = True
+                request_failures["rate_limit_circuit_open"] = 1
                 break
         consume_calls()
         if len(errors) >= config.max_calls_per_question + 1:

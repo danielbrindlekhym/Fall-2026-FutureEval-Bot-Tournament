@@ -99,6 +99,12 @@ def run(config: Config, state: State, remote, model, *, practice=False, max_ques
                 reconcile_and_submit(state, remote, contract.question_id)
                 attempted += 1
                 continue
+            # Configurations are frozen per question, so a blocked model set can
+            # defer this job without suppressing a later job with other free models.
+            job_config = Config(**json.loads(job["config"]))
+            if model.rate_limit_circuit_open(job_config):
+                model.rate_limit_circuit_opened = True
+                continue  # Defer this job while still reconciling later frozen payloads.
             if not contract.forecastable() or contract.remaining() <= config.deadline_reserve_seconds:
                 state.update(contract.question_id, phase="missed", error="Insufficient time before close")
                 continue
@@ -108,7 +114,6 @@ def run(config: Config, state: State, remote, model, *, practice=False, max_ques
                 continue
             attempted += 1
             # Freeze each job's configuration from initial discovery.
-            job_config = Config(**json.loads(job["config"]))
             previous_config = model.config
             model.config = job_config
             seconds = min(job_config.question_budget_seconds, contract.remaining() - job_config.deadline_reserve_seconds)
@@ -158,6 +163,7 @@ def run(config: Config, state: State, remote, model, *, practice=False, max_ques
         "failures": failures, "questions_considered": attempted, "unsupported_posts": skipped})
     result = state.summary(project)
     result["release_inventory_counts"] = export_counts
+    result["rate_limit_circuit_open"] = bool(getattr(model, "rate_limit_circuit_opened", False))
     result["failures"] = failures
     result["practice_verified_formats"] = state.meta("practice_verified_formats", [])
     return result

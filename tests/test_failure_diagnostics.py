@@ -26,6 +26,8 @@ def test_exhaustion_reports_causes_without_response_content(setup):
     state, q, config = setup
     secret_text = 'synthetic-response-private-content-must-not-appear'
     class Model:
+        def rate_limit_circuit_open(self, config=None):
+            return False
         sends = 0
         def complete(self, question_id, prompt, index, timeout):
             call = state.reserve_call(question_id, config.models[0], config)
@@ -51,6 +53,8 @@ def test_exhausted_replay_cannot_send_again(setup):
     for _ in range(3):
         state.reserve_call(q.question_id, config.models[0], config)
     class Model:
+        def rate_limit_circuit_open(self, config=None):
+            return False
         sends = 0
         def complete(self, question_id, prompt, index, timeout):
             state.reserve_call(question_id, config.models[0], config)
@@ -95,7 +99,8 @@ def test_run_keeps_failure_and_exports_only_safe_diagnostics(setup, monkeypatch)
         def submit_pair(self, *args):
             raise AssertionError('A failed preparation must never submit')
     class Model:
-        pass
+        def rate_limit_circuit_open(self, config=None):
+            return False
     model = Model()
     model.config = config
     result = run(config, state, Remote(), model, practice=True)
@@ -109,6 +114,8 @@ def test_cost_halt_is_retained(setup):
     state, q, config = setup
     state.set_meta('cost_guard_halt', {'synthetic': True})
     class Model:
+        def rate_limit_circuit_open(self, config=None):
+            return False
         def complete(self, *args, **kwargs):
             raise ServiceError('Cost guard is halted pending an audit')
     with pytest.raises(NoValidatedForecast) as caught:
