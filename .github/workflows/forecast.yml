@@ -32,12 +32,21 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          fetch-depth: 1
           persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.12'
       - name: Install pinned direct dependencies
         run: python -m pip install -r requirements.txt
+      - name: Fetch immutable readiness verification baseline
+        shell: bash
+        run: |
+          set -eu
+          baseline_commit='f0a423142e6ccb499ba483fe769b8cfcb8e88b30'
+          expected_tree='6aab6dd6cb39d5feeebf6cf1f47a9e6f07309fd5'
+          git fetch --no-tags --depth=1 origin "$baseline_commit"
+          test "$(git rev-parse "${baseline_commit}^{tree}")" = "$expected_tree"
       - name: Verify reliability for this source and configuration
         run: python scripts/verify.py
       - name: Restore encrypted durable progress

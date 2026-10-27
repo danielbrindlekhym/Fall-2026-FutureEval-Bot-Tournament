@@ -6,6 +6,7 @@ on:
     types: [opened, synchronize, reopened]
     paths:
       - '.github/workflows/readiness-diagnostics-offline-verification.yml'
+      - '.github/workflows/forecast.yml'
       - 'futureeval_bot/api.py'
       - 'futureeval_bot/forecast.py'
       - 'futureeval_bot/readiness.py'
@@ -29,6 +30,7 @@ jobs:
       PYTHONUTF8: '1'
       EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       EXPECTED_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      EXPECTED_PRODUCTION_SHA: 60af9e380884081fbf0c81e93ede45b1b2fe38ab
     steps:
       - name: Verify repository is public for the $0 runner scope
         shell: bash
@@ -44,19 +46,61 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 2
+          fetch-depth: 1
           persist-credentials: false
 
-      - name: Assert exact base, one-commit candidate delta, and reviewed blobs
+      - name: Prove shallow checkout and immutable production fetches
+        shell: bash
+        run: |
+          set -euo pipefail
+          baseline_commit='f0a423142e6ccb499ba483fe769b8cfcb8e88b30'
+          expected_tree='6aab6dd6cb39d5feeebf6cf1f47a9e6f07309fd5'
+          production_base='517b2a89aa51c2b56b933e7520516a43a874a6be'
+          production_tree='4895f7b7fcc7155ef764aa8bb6bc62795db9bf34'
+          test "$(git rev-list --count HEAD)" = 1
+          if git cat-file -e "${baseline_commit}^{commit}" 2>/dev/null; then
+            echo 'Pinned baseline was already present before the exact fetch.' >&2
+            exit 1
+          fi
+          head_before="$(git rev-parse HEAD)"
+          git fetch --no-tags --depth=1 origin "$EXPECTED_PRODUCTION_SHA"
+          test "$(git rev-parse "$EXPECTED_PRODUCTION_SHA^{tree}")" = 3e48950876143764a98cdc969939c7613edb9cfd
+          production_parent="$(git cat-file -p "$EXPECTED_PRODUCTION_SHA" | sed -n 's/^parent //p' | head -n 1)"
+          test "$production_parent" = "$production_base"
+          test "$(git rev-parse "$EXPECTED_PRODUCTION_SHA:.github/workflows/forecast.yml")" = c98ddf8c2308bfa5203b8d2087a99e6bbc8a7c48
+          git fetch --no-tags --depth=1 origin "$production_base"
+          test "$(git rev-parse "${production_base}^{tree}")" = "$production_tree"
+          git fetch --no-tags --depth=1 origin "$baseline_commit"
+          test "$(git rev-parse "${baseline_commit}^{tree}")" = "$expected_tree"
+          test "$(git rev-parse HEAD)" = "$head_before"
+          python - <<'PY'
+          import json
+          import subprocess
+          from pathlib import Path
+
+          manifest = json.loads(Path('tests/fixtures/readiness_release_bundle_manifest.json').read_text())
+          files = manifest['baseline_files']
+          assert manifest['base_commit'] == 'f0a423142e6ccb499ba483fe769b8cfcb8e88b30'
+          assert manifest['base_tree'] == '6aab6dd6cb39d5feeebf6cf1f47a9e6f07309fd5'
+          assert len(files) == 30
+          for item in files:
+              actual = subprocess.check_output(['git', 'rev-parse', f"{manifest['base_commit']}:{item['path']}"], text=True).strip()
+              assert actual == item['sha'], item['path']
+          PY
+
+      - name: Assert exact base, candidate delta, and reviewed blobs
         shell: bash
         run: |
           set -euo pipefail
           test "$GITHUB_BASE_REF" = main
-          test "$EXPECTED_BASE_SHA" = f0a423142e6ccb499ba483fe769b8cfcb8e88b30
+          test "$EXPECTED_BASE_SHA" = 517b2a89aa51c2b56b933e7520516a43a874a6be
           test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD_SHA"
-          test "$(git rev-parse HEAD^)" = f0a423142e6ccb499ba483fe769b8cfcb8e88b30
-          expected_paths=$'.github/workflows/readiness-diagnostics-offline-verification.yml\nfutureeval_bot/api.py\nfutureeval_bot/forecast.py\nfutureeval_bot/readiness.py\nscripts/validate_readiness_ci.py\ntests/fixtures/readiness_release_bundle_manifest.json\ntests/test_failure_diagnostics.py\ntests/test_readiness_reason_diagnostics.py'
-          actual_paths="$(git diff-tree --no-commit-id --name-only -r HEAD^ HEAD)"
+          head_parent="$(git cat-file -p "$EXPECTED_HEAD_SHA" | sed -n 's/^parent //p' | head -n 1)"
+          test "$head_parent" = "$EXPECTED_PRODUCTION_SHA"
+          production_parent="$(git cat-file -p "$EXPECTED_PRODUCTION_SHA" | sed -n 's/^parent //p' | head -n 1)"
+          test "$production_parent" = "$EXPECTED_BASE_SHA"
+          expected_paths=$'.github/workflows/forecast.yml\n.github/workflows/readiness-diagnostics-offline-verification.yml'
+          actual_paths="$(git diff-tree --no-commit-id --name-only -r "$EXPECTED_BASE_SHA" "$EXPECTED_HEAD_SHA")"
           test "$actual_paths" = "$expected_paths"
           check_blob() {
             local expected="$1" path="$2" actual
@@ -71,13 +115,13 @@ jobs:
           check_blob 525a572e821065161962298a6e290d928aa230ff tests/test_failure_diagnostics.py
           check_blob 9a6a746d56f001a8249f92b526eec1ec95a3ac18 futureeval_bot/__main__.py
           check_blob 304b0096e68309f7c81a8455d0fe39e033802607 futureeval_bot/core.py
-          check_blob 209c66cd2da7e07820e8af1255bf8d89e5f00c8b .github/workflows/forecast.yml
+          check_blob c98ddf8c2308bfa5203b8d2087a99e6bbc8a7c48 .github/workflows/forecast.yml
           check_blob adce8800cb42eaf5b3a894c1d8400cff805c5864 .github/workflows/offline-verification.yml
           check_blob e2c4e8f990e74f816dd230e486eb229c5304acaa config.json
           check_blob b801b66111cb4f6374e402575d142994f7f18a79 requirements.txt
           check_blob 6e13805047ca875879051a4d552380a787e03847 scripts/verify.py
           check_blob 984b1179eff6b01dd8e890004472de684f72e408 tests/conftest.py
-          printf 'Candidate head: %s\nParent: %s\nWorkflow run ID: %s\n' "$EXPECTED_HEAD_SHA" "$(git rev-parse HEAD^)" "$GITHUB_RUN_ID" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Candidate head: %s\nParent: %s\nWorkflow run ID: %s\n' "$EXPECTED_HEAD_SHA" "$head_parent" "$GITHUB_RUN_ID" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Set up Python 3.12
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
