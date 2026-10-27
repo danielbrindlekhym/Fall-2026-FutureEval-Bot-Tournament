@@ -1,0 +1,165 @@
+name: Proposed readiness diagnostics full offline verification
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+    paths:
+      - '.github/workflows/readiness-diagnostics-offline-verification.yml'
+      - 'futureeval_bot/api.py'
+      - 'futureeval_bot/forecast.py'
+      - 'futureeval_bot/readiness.py'
+      - 'scripts/validate_readiness_ci.py'
+      - 'tests/fixtures/readiness_release_bundle_manifest.json'
+      - 'tests/test_failure_diagnostics.py'
+      - 'tests/test_readiness_reason_diagnostics.py'
+
+permissions:
+  contents: read
+
+jobs:
+  verify-readiness-candidate:
+    if: github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      LITELLM_LOCAL_MODEL_COST_MAP: 'True'
+      PYTHONUTF8: '1'
+      EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      EXPECTED_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+    steps:
+      - name: Verify repository is public for the $0 runner scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          response="$(curl --fail --silent --show-error --max-time 15 \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}")"
+          python -c 'import json,sys; data=json.load(sys.stdin); assert data.get("private") is False and data.get("archived") is False' <<< "$response"
+          echo 'Repository visibility: public; standard ubuntu-24.04 runner scope is eligible for $0 GitHub-hosted compute.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check out exact pull request head without credential persistence
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Assert exact base, one-commit candidate delta, and reviewed blobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_BASE_REF" = main
+          test "$EXPECTED_BASE_SHA" = f0a423142e6ccb499ba483fe769b8cfcb8e88b30
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD_SHA"
+          test "$(git rev-parse HEAD^)" = f0a423142e6ccb499ba483fe769b8cfcb8e88b30
+          expected_paths=$'.github/workflows/readiness-diagnostics-offline-verification.yml\nfutureeval_bot/api.py\nfutureeval_bot/forecast.py\nfutureeval_bot/readiness.py\nscripts/validate_readiness_ci.py\ntests/fixtures/readiness_release_bundle_manifest.json\ntests/test_failure_diagnostics.py\ntests/test_readiness_reason_diagnostics.py'
+          actual_paths="$(git diff-tree --no-commit-id --name-only -r HEAD^ HEAD)"
+          test "$actual_paths" = "$expected_paths"
+          check_blob() {
+            local expected="$1" path="$2" actual
+            actual="$(git rev-parse "HEAD:$path")"
+            test "$actual" = "$expected" || { echo "Reviewed Git blob mismatch: $path" >&2; exit 1; }
+          }
+          check_blob 2354a1cae00fa04fdfafbcd5dd10c372ce150e9c futureeval_bot/api.py
+          check_blob fa5b122d70de481c3b54df8f3954626cc851244e futureeval_bot/forecast.py
+          check_blob b7051517115f03b50f6de7344bf31b9e8cc7da5b futureeval_bot/readiness.py
+          check_blob 86dc3d0146f966266c63836fca358f55ebc87d3a tests/test_readiness_reason_diagnostics.py
+          check_blob e267da59b6b2473aa5e262334c7440bc6ad20f8f tests/fixtures/readiness_release_bundle_manifest.json
+          check_blob 525a572e821065161962298a6e290d928aa230ff tests/test_failure_diagnostics.py
+          check_blob 9a6a746d56f001a8249f92b526eec1ec95a3ac18 futureeval_bot/__main__.py
+          check_blob 304b0096e68309f7c81a8455d0fe39e033802607 futureeval_bot/core.py
+          check_blob 209c66cd2da7e07820e8af1255bf8d89e5f00c8b .github/workflows/forecast.yml
+          check_blob adce8800cb42eaf5b3a894c1d8400cff805c5864 .github/workflows/offline-verification.yml
+          check_blob e2c4e8f990e74f816dd230e486eb229c5304acaa config.json
+          check_blob b801b66111cb4f6374e402575d142994f7f18a79 requirements.txt
+          check_blob 6e13805047ca875879051a4d552380a787e03847 scripts/verify.py
+          check_blob 984b1179eff6b01dd8e890004472de684f72e408 tests/conftest.py
+          printf 'Candidate head: %s\nParent: %s\nWorkflow run ID: %s\n' "$EXPECTED_HEAD_SHA" "$(git rev-parse HEAD^)" "$GITHUB_RUN_ID" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+
+      - name: Install directly pinned project dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Record resolved runtime and dependency versions
+        shell: bash
+        run: |
+          {
+            echo '## Runtime and resolved dependencies'
+            python --version
+            python -m pip --version
+            python -m pip freeze
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove stale verification outputs
+        shell: bash
+        run: |
+          rm -f outputs/offline-verification.json work/offline-tests.xml
+          mkdir -p outputs work
+
+      - name: Block new outbound traffic before executing tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v iptables
+          command -v ip6tables
+          tag="futureeval-readiness-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          sudo iptables -I OUTPUT 1 -o lo -m comment --comment "${tag}-v4-lo" -j ACCEPT
+          sudo iptables -I OUTPUT 2 -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment "${tag}-v4-established" -j ACCEPT
+          sudo iptables -I OUTPUT 3 -m comment --comment "${tag}-v4-reject" -j REJECT
+          sudo ip6tables -I OUTPUT 1 -o lo -m comment --comment "${tag}-v6-lo" -j ACCEPT
+          sudo ip6tables -I OUTPUT 2 -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment "${tag}-v6-established" -j ACCEPT
+          sudo ip6tables -I OUTPUT 3 -m comment --comment "${tag}-v6-reject" -j REJECT
+
+      - name: Run the complete offline verifier with a clean environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          empty_home="$RUNNER_TEMP/futureeval-empty-home"
+          mkdir -p "$empty_home"
+          env -i PATH="$PATH" HOME="$empty_home" LANG=C.UTF-8 PYTHONUTF8=1 \
+            LITELLM_LOCAL_MODEL_COST_MAP=True python scripts/verify.py
+
+      - name: Validate both complete verification records; fail closed if absent or incomplete
+        if: always()
+        run: python scripts/validate_readiness_ci.py
+
+      - name: Restore only this job's temporary outbound rules after verification
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="futureeval-readiness-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          remove_owned_rule() {
+            local tool="$1"
+            local marker="$2"
+            shift 2
+            local saved count
+            saved="$(sudo "${tool}-save" -t filter)"
+            count="$(grep -F -c -- "$marker" <<< "$saved" || true)"
+            if [[ "$count" == 0 ]]; then
+              return 0
+            fi
+            if [[ "$count" != 1 ]]; then
+              echo "Expected at most one owned firewall rule for ${marker}; found ${count}." >&2
+              return 1
+            fi
+            sudo "$tool" -D OUTPUT "$@"
+            saved="$(sudo "${tool}-save" -t filter)"
+            if grep -Fq -- "$marker" <<< "$saved"; then
+              echo "Owned firewall rule remains after cleanup: ${marker}." >&2
+              return 1
+            fi
+          }
+          remove_owned_rule iptables "${tag}-v4-lo" -o lo -m comment --comment "${tag}-v4-lo" -j ACCEPT
+          remove_owned_rule iptables "${tag}-v4-established" -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment "${tag}-v4-established" -j ACCEPT
+          remove_owned_rule iptables "${tag}-v4-reject" -m comment --comment "${tag}-v4-reject" -j REJECT
+          remove_owned_rule ip6tables "${tag}-v6-lo" -o lo -m comment --comment "${tag}-v6-lo" -j ACCEPT
+          remove_owned_rule ip6tables "${tag}-v6-established" -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment "${tag}-v6-established" -j ACCEPT
+          remove_owned_rule ip6tables "${tag}-v6-reject" -m comment --comment "${tag}-v6-reject" -j REJECT

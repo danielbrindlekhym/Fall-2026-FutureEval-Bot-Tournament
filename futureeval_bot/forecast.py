@@ -223,6 +223,7 @@ def prepare(state: State, contract: Contract, config: Config, model, evidence: d
     errors = []
     validation_failures, request_failures = {}, {}
     completion_shapes = {}
+    readiness_check_failures, readiness_selector_stops = {}, {}
     # Reparse persisted model responses first; a crash must not erase usable samples.
     def consume_calls():
         for call in state.completed_calls(contract.question_id):
@@ -256,8 +257,13 @@ def prepare(state: State, contract: Contract, config: Config, model, evidence: d
             if errors:
                 prompt += "\nPrevious automatic formatting validation failed: " + errors[-1] + ". Produce valid JSON and obey the specified format."
             model.complete(contract.question_id, prompt, index, timeout=stop_at - time.monotonic())
-        except ReadinessStopped:
+        except ReadinessStopped as stopped:
             request_failures['readiness_stopped'] = request_failures.get('readiness_stopped', 0) + 1
+            for code, count in stopped.diagnostics["check_failure_counts"].items():
+                readiness_check_failures[code] = readiness_check_failures.get(code, 0) + count
+            selector_stop = stopped.diagnostics["selector_stop"]
+            if selector_stop:
+                readiness_selector_stops[selector_stop] = readiness_selector_stops.get(selector_stop, 0) + 1
             break  # No reservation increment: do not refetch through this loop.
         except Exception as error:
             code = failure_category(error, "request")
@@ -277,7 +283,11 @@ def prepare(state: State, contract: Contract, config: Config, model, evidence: d
         raise NoValidatedForecast({"validation_failures": validation_failures,
             "request_failures": request_failures, "reserved_calls": state.call_count(contract.question_id),
             "cost_guard_halted": bool(state.meta("cost_guard_halt")),
-            "completion_shapes": completion_shapes})
+            "completion_shapes": completion_shapes,
+            "readiness_diagnostics": {
+                "check_failure_counts": readiness_check_failures,
+                "selector_stop_counts": readiness_selector_stops,
+            }})
     payload = aggregate(contract, [sample["payload"] for sample in valid])
     marker_hash = hashlib.sha256((str(contract.question_id) + canonical(payload)).encode()).hexdigest()[:20]
     marker = "FutureEval submission " + marker_hash
@@ -286,4 +296,3 @@ def prepare(state: State, contract: Contract, config: Config, model, evidence: d
     explanation = f"{marker}\n\nConfiguration: {config.version} / {config.fingerprint}\nGenerated: {utcnow().isoformat()}\n\nFinal forecast payload:\n{canonical(payload)}\n\n{reasoning}\n\nEvidence sources:\n{source_list}\n\nResearch limitations: {evidence.get('limitations', '')}\nMethod: arithmetic pooling of {len(valid)} validated independent samples."
     state.update(contract.question_id, payload=canonical(payload), explanation=explanation,
         samples=canonical(valid), phase="prepared", error=None)
-

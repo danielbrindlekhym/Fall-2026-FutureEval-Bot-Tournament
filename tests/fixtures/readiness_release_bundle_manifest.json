@@ -1,0 +1,127 @@
+{
+  "base_commit": "f0a423142e6ccb499ba483fe769b8cfcb8e88b30",
+  "base_tree": "6aab6dd6cb39d5feeebf6cf1f47a9e6f07309fd5",
+  "baseline_files": [
+    {
+      "path": ".env.example",
+      "sha": "99647baffc0a28c3b4d2a4d9547ba6f3b4beffce"
+    },
+    {
+      "path": ".github/workflows/forecast.yml",
+      "sha": "209c66cd2da7e07820e8af1255bf8d89e5f00c8b"
+    },
+    {
+      "path": ".github/workflows/offline-verification.yml",
+      "sha": "adce8800cb42eaf5b3a894c1d8400cff805c5864"
+    },
+    {
+      "path": ".gitignore",
+      "sha": "e8961caa3130936f5252e14e8c766bb6a890986e"
+    },
+    {
+      "path": "NOTICE.md",
+      "sha": "63b54fb27db016d4c59f9f0e41b3f998133130cf"
+    },
+    {
+      "path": "README.md",
+      "sha": "6434cba5b3e9415114b5d095b8c48a97c74d6004"
+    },
+    {
+      "path": "config.json",
+      "sha": "e2c4e8f990e74f816dd230e486eb229c5304acaa"
+    },
+    {
+      "path": "futureeval_bot/__init__.py",
+      "sha": "baa5ea482584057a4cb5b19d472025f6bfa4f386"
+    },
+    {
+      "path": "futureeval_bot/__main__.py",
+      "sha": "9a6a746d56f001a8249f92b526eec1ec95a3ac18"
+    },
+    {
+      "path": "futureeval_bot/api.py",
+      "sha": "726b2ffdebeda55b7238a097517d28928dd07426"
+    },
+    {
+      "path": "futureeval_bot/cloud.py",
+      "sha": "8da52b76fd78f413a45275cb4f8718df21e33597"
+    },
+    {
+      "path": "futureeval_bot/core.py",
+      "sha": "304b0096e68309f7c81a8455d0fe39e033802607"
+    },
+    {
+      "path": "futureeval_bot/forecast.py",
+      "sha": "6b4c557fc6bc07766ee1076c35832da37e52ad08"
+    },
+    {
+      "path": "futureeval_bot/inventory.py",
+      "sha": "df02d475490f1682e1740fbacd611352ed575efc"
+    },
+    {
+      "path": "futureeval_bot/readiness.py",
+      "sha": "ca1df9cc3ec5dc2c6ca070f29ee97386e71371ae"
+    },
+    {
+      "path": "futureeval_bot/research.py",
+      "sha": "7ace4bd38e0ca7bb09db4a7ac2b49ca33723ac4f"
+    },
+    {
+      "path": "requirements.txt",
+      "sha": "b801b66111cb4f6374e402575d142994f7f18a79"
+    },
+    {
+      "path": "scripts/verify.py",
+      "sha": "6e13805047ca875879051a4d552380a787e03847"
+    },
+    {
+      "path": "tests/conftest.py",
+      "sha": "984b1179eff6b01dd8e890004472de684f72e408"
+    },
+    {
+      "path": "tests/test_bot.py",
+      "sha": "ea20497c0d5058853635ce594b7ac4c40fcc8ab7"
+    },
+    {
+      "path": "tests/test_checkpoint_read_stability.py",
+      "sha": "e1dbe9e6fc4f5f43dc2587284e9ccd62a703b8eb"
+    },
+    {
+      "path": "tests/test_cloud.py",
+      "sha": "05733a157d278418932885d1bab05263f6c2f18d"
+    },
+    {
+      "path": "tests/test_cloud_conflicts.py",
+      "sha": "5faec591daea836bf8034034fdab040f1b5c7bae"
+    },
+    {
+      "path": "tests/test_failure_diagnostics.py",
+      "sha": "b31b6315bbc0442e88b599e1115f73de4927852c"
+    },
+    {
+      "path": "tests/test_immutable_read.py",
+      "sha": "4b6b6c95b3f6938f5835bcbad4950eacccaa0101"
+    },
+    {
+      "path": "tests/test_inventory.py",
+      "sha": "7bdf7e774fcbe86d9a9e3caf4bf9393ac3d565a8"
+    },
+    {
+      "path": "tests/test_overflow_guard.py",
+      "sha": "67e07b4041751a91e264df155371474b10eef625"
+    },
+    {
+      "path": "tests/test_preflight_reads.py",
+      "sha": "a501932b2a60f02b288cc3659d1523b703655e38"
+    },
+    {
+      "path": "tests/test_rate_limit_circuit.py",
+      "sha": "e89aee7bf63d7a7c7bff2e8c973b9043081089ff"
+    },
+    {
+      "path": "tests/test_receipt_guard.py",
+      "sha": "479c7af57cbf9ed6008735381dcb69460c76b16d"
+    }
+  ],
+  "schema_version": 1
+}
