@@ -8,12 +8,15 @@ on:
       - '.github/workflows/readiness-diagnostics-offline-verification.yml'
       - '.github/workflows/forecast.yml'
       - 'futureeval_bot/api.py'
+      - 'futureeval_bot/__main__.py'
+      - 'futureeval_bot/operational_summary.py'
       - 'futureeval_bot/forecast.py'
       - 'futureeval_bot/readiness.py'
       - 'scripts/validate_readiness_ci.py'
       - 'tests/fixtures/readiness_release_bundle_manifest.json'
       - 'tests/test_failure_diagnostics.py'
       - 'tests/test_readiness_reason_diagnostics.py'
+      - 'tests/test_operational_summary_v2.py'
 
 permissions:
   contents: read
@@ -30,7 +33,7 @@ jobs:
       PYTHONUTF8: '1'
       EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       EXPECTED_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-      EXPECTED_PRODUCTION_SHA: 60af9e380884081fbf0c81e93ede45b1b2fe38ab
+      EXPECTED_SOURCE_SHA: b8215556c2c3efcb37486b0e633de2f06e2a573f
     steps:
       - name: Verify repository is public for the $0 runner scope
         shell: bash
@@ -55,21 +58,35 @@ jobs:
           set -euo pipefail
           baseline_commit='f0a423142e6ccb499ba483fe769b8cfcb8e88b30'
           expected_tree='6aab6dd6cb39d5feeebf6cf1f47a9e6f07309fd5'
-          production_base='517b2a89aa51c2b56b933e7520516a43a874a6be'
-          production_tree='4895f7b7fcc7155ef764aa8bb6bc62795db9bf34'
+          production_base='1c9fc16ef8c4752472e712a9d3f3c1707e779da7'
+          production_tree='7d10c90c5f2e96facf73a7a255de9118beb06b2a'
+          release_parent='517b2a89aa51c2b56b933e7520516a43a874a6be'
+          release_tree='4895f7b7fcc7155ef764aa8bb6bc62795db9bf34'
+          release_side_parent='c65ad9ffefa6c8f632e0d6d9fb094abb9443c74e'
+          source_commit="$EXPECTED_SOURCE_SHA"
+          source_tree='58191fcb4292b12bb0f546ed7622a86366197398'
           test "$(git rev-list --count HEAD)" = 1
-          if git cat-file -e "${baseline_commit}^{commit}" 2>/dev/null; then
-            echo 'Pinned baseline was already present before the exact fetch.' >&2
+          if git cat-file -e "${source_commit}^{commit}" 2>/dev/null; then
+            echo 'Pinned source commit was already present before the exact fetch.' >&2
             exit 1
           fi
           head_before="$(git rev-parse HEAD)"
-          git fetch --no-tags --depth=1 origin "$EXPECTED_PRODUCTION_SHA"
-          test "$(git rev-parse "$EXPECTED_PRODUCTION_SHA^{tree}")" = 3e48950876143764a98cdc969939c7613edb9cfd
-          production_parent="$(git cat-file -p "$EXPECTED_PRODUCTION_SHA" | sed -n 's/^parent //p' | head -n 1)"
-          test "$production_parent" = "$production_base"
-          test "$(git rev-parse "$EXPECTED_PRODUCTION_SHA:.github/workflows/forecast.yml")" = c98ddf8c2308bfa5203b8d2087a99e6bbc8a7c48
+          if git cat-file -e "${baseline_commit}^{commit}" 2>/dev/null; then
+            echo 'Pinned immutable baseline was already present before the exact fetch.' >&2
+            exit 1
+          fi
+          git fetch --no-tags --depth=1 origin "$source_commit"
+          test "$(git rev-parse "$source_commit^{tree}")" = "$source_tree"
+          source_parent="$(git cat-file -p "$source_commit" | sed -n 's/^parent //p')"
+          test "$source_parent" = "$production_base"
           git fetch --no-tags --depth=1 origin "$production_base"
           test "$(git rev-parse "${production_base}^{tree}")" = "$production_tree"
+          production_parents="$(git cat-file -p "$production_base" | sed -n 's/^parent //p')"
+          test "$production_parents" = "$(printf '%s\n%s' "$release_parent" "$release_side_parent")"
+          git fetch --no-tags --depth=1 origin "$release_parent"
+          test "$(git rev-parse "${release_parent}^{tree}")" = "$release_tree"
+          release_parents="$(git cat-file -p "$release_parent" | sed -n 's/^parent //p')"
+          test "$release_parents" = "$(printf '%s\n%s' "$baseline_commit" 1c20d21047d354d3050e41986e4ac361fb5a123d)"
           git fetch --no-tags --depth=1 origin "$baseline_commit"
           test "$(git rev-parse "${baseline_commit}^{tree}")" = "$expected_tree"
           test "$(git rev-parse HEAD)" = "$head_before"
@@ -93,35 +110,47 @@ jobs:
         run: |
           set -euo pipefail
           test "$GITHUB_BASE_REF" = main
-          test "$EXPECTED_BASE_SHA" = 517b2a89aa51c2b56b933e7520516a43a874a6be
+          test "$EXPECTED_BASE_SHA" = 1c9fc16ef8c4752472e712a9d3f3c1707e779da7
+          test "$EXPECTED_SOURCE_SHA" = b8215556c2c3efcb37486b0e633de2f06e2a573f
           test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD_SHA"
-          head_parent="$(git cat-file -p "$EXPECTED_HEAD_SHA" | sed -n 's/^parent //p' | head -n 1)"
-          test "$head_parent" = "$EXPECTED_PRODUCTION_SHA"
-          production_parent="$(git cat-file -p "$EXPECTED_PRODUCTION_SHA" | sed -n 's/^parent //p' | head -n 1)"
-          test "$production_parent" = "$EXPECTED_BASE_SHA"
-          expected_paths=$'.github/workflows/forecast.yml\n.github/workflows/readiness-diagnostics-offline-verification.yml'
+          head_parents="$(git cat-file -p "$EXPECTED_HEAD_SHA" | sed -n 's/^parent //p')"
+          test "$head_parents" = "$EXPECTED_SOURCE_SHA"
+          test "$(git rev-parse "$EXPECTED_SOURCE_SHA^{tree}")" = 58191fcb4292b12bb0f546ed7622a86366197398
+          source_parent="$(git cat-file -p "$EXPECTED_SOURCE_SHA" | sed -n 's/^parent //p')"
+          test "$source_parent" = "$EXPECTED_BASE_SHA"
+          source_paths=$'.github/workflows/forecast.yml\nfutureeval_bot/__main__.py\nfutureeval_bot/operational_summary.py\ntests/test_operational_summary_v2.py'
+          actual_source_paths="$(git diff-tree --no-commit-id --name-only -r "$EXPECTED_BASE_SHA" "$EXPECTED_SOURCE_SHA")"
+          test "$actual_source_paths" = "$source_paths"
+          ci_paths=$'.github/workflows/readiness-diagnostics-offline-verification.yml\nscripts/validate_readiness_ci.py'
+          actual_ci_paths="$(git diff-tree --no-commit-id --name-only -r "$EXPECTED_SOURCE_SHA" "$EXPECTED_HEAD_SHA")"
+          test "$actual_ci_paths" = "$ci_paths"
+          expected_paths=$'.github/workflows/forecast.yml\n.github/workflows/readiness-diagnostics-offline-verification.yml\nfutureeval_bot/__main__.py\nfutureeval_bot/operational_summary.py\nscripts/validate_readiness_ci.py\ntests/test_operational_summary_v2.py'
           actual_paths="$(git diff-tree --no-commit-id --name-only -r "$EXPECTED_BASE_SHA" "$EXPECTED_HEAD_SHA")"
           test "$actual_paths" = "$expected_paths"
           check_blob() {
-            local expected="$1" path="$2" actual
-            actual="$(git rev-parse "HEAD:$path")"
-            test "$actual" = "$expected" || { echo "Reviewed Git blob mismatch: $path" >&2; exit 1; }
+            local expected="$1" object_path="$2" actual
+            actual="$(git rev-parse "$object_path")"
+            test "$actual" = "$expected" || { echo "Reviewed Git blob mismatch: $object_path" >&2; exit 1; }
           }
-          check_blob 2354a1cae00fa04fdfafbcd5dd10c372ce150e9c futureeval_bot/api.py
-          check_blob fa5b122d70de481c3b54df8f3954626cc851244e futureeval_bot/forecast.py
-          check_blob b7051517115f03b50f6de7344bf31b9e8cc7da5b futureeval_bot/readiness.py
-          check_blob 86dc3d0146f966266c63836fca358f55ebc87d3a tests/test_readiness_reason_diagnostics.py
-          check_blob e267da59b6b2473aa5e262334c7440bc6ad20f8f tests/fixtures/readiness_release_bundle_manifest.json
-          check_blob 525a572e821065161962298a6e290d928aa230ff tests/test_failure_diagnostics.py
-          check_blob 9a6a746d56f001a8249f92b526eec1ec95a3ac18 futureeval_bot/__main__.py
-          check_blob 304b0096e68309f7c81a8455d0fe39e033802607 futureeval_bot/core.py
-          check_blob c98ddf8c2308bfa5203b8d2087a99e6bbc8a7c48 .github/workflows/forecast.yml
-          check_blob adce8800cb42eaf5b3a894c1d8400cff805c5864 .github/workflows/offline-verification.yml
-          check_blob e2c4e8f990e74f816dd230e486eb229c5304acaa config.json
-          check_blob b801b66111cb4f6374e402575d142994f7f18a79 requirements.txt
-          check_blob 6e13805047ca875879051a4d552380a787e03847 scripts/verify.py
-          check_blob 984b1179eff6b01dd8e890004472de684f72e408 tests/conftest.py
-          printf 'Candidate head: %s\nParent: %s\nWorkflow run ID: %s\n' "$EXPECTED_HEAD_SHA" "$head_parent" "$GITHUB_RUN_ID" >> "$GITHUB_STEP_SUMMARY"
+          check_blob c98ddf8c2308bfa5203b8d2087a99e6bbc8a7c48 "$EXPECTED_BASE_SHA:.github/workflows/forecast.yml"
+          check_blob 9a6a746d56f001a8249f92b526eec1ec95a3ac18 "$EXPECTED_BASE_SHA:futureeval_bot/__main__.py"
+          check_blob 304b0096e68309f7c81a8455d0fe39e033802607 "$EXPECTED_BASE_SHA:futureeval_bot/core.py"
+          check_blob e2c4e8f990e74f816dd230e486eb229c5304acaa "$EXPECTED_BASE_SHA:config.json"
+          check_blob b801b66111cb4f6374e402575d142994f7f18a79 "$EXPECTED_BASE_SHA:requirements.txt"
+          check_blob 39a86c773ab58a70ad976955257220e9c458a61c "$EXPECTED_SOURCE_SHA:.github/workflows/forecast.yml"
+          check_blob bd6bc2e8ecc96bff159e024534b667c5b6fecf99 "$EXPECTED_SOURCE_SHA:futureeval_bot/__main__.py"
+          check_blob 24ef097095d4b48186dfa7acced9cfa4bac15b67 "$EXPECTED_SOURCE_SHA:futureeval_bot/operational_summary.py"
+          check_blob 35eb1d347717524c84d0c1596fcf1c5bfca48ea2 "$EXPECTED_SOURCE_SHA:tests/test_operational_summary_v2.py"
+          check_blob 2354a1cae00fa04fdfafbcd5dd10c372ce150e9c "$EXPECTED_SOURCE_SHA:futureeval_bot/api.py"
+          check_blob fa5b122d70de481c3b54df8f3954626cc851244e "$EXPECTED_SOURCE_SHA:futureeval_bot/forecast.py"
+          check_blob b7051517115f03b50f6de7344bf31b9e8cc7da5b "$EXPECTED_SOURCE_SHA:futureeval_bot/readiness.py"
+          check_blob 86dc3d0146f966266c63836fca358f55ebc87d3a "$EXPECTED_SOURCE_SHA:tests/test_readiness_reason_diagnostics.py"
+          check_blob e267da59b6b2473aa5e262334c7440bc6ad20f8f "$EXPECTED_SOURCE_SHA:tests/fixtures/readiness_release_bundle_manifest.json"
+          check_blob 525a572e821065161962298a6e290d928aa230ff "$EXPECTED_SOURCE_SHA:tests/test_failure_diagnostics.py"
+          check_blob adce8800cb42eaf5b3a894c1d8400cff805c5864 "$EXPECTED_SOURCE_SHA:.github/workflows/offline-verification.yml"
+          check_blob 6e13805047ca875879051a4d552380a787e03847 "$EXPECTED_SOURCE_SHA:scripts/verify.py"
+          check_blob 984b1179eff6b01dd8e890004472de684f72e408 "$EXPECTED_SOURCE_SHA:tests/conftest.py"
+          printf 'Candidate head: %s\nSource commit: %s\nBase commit: %s\nWorkflow run ID: %s\n' "$EXPECTED_HEAD_SHA" "$EXPECTED_SOURCE_SHA" "$EXPECTED_BASE_SHA" "$GITHUB_RUN_ID" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Set up Python 3.12
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
