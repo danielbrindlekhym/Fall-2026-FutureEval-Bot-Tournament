@@ -45,7 +45,8 @@ def live_gate(config: Config, state: State):
         raise ServiceError("; ".join(problems))
 
 
-def run(config: Config, state: State, remote, model, *, practice=False, max_questions=None) -> dict:
+def run(config: Config, state: State, remote, model, *, practice=False, max_questions=None,
+        workflow_run_id=None, workflow_run_attempt=None, operation_started_at=None) -> dict:
     project = config.practice_project if practice else config.season_project
     if not practice:
         live_gate(config, state)
@@ -160,7 +161,9 @@ def run(config: Config, state: State, remote, model, *, practice=False, max_ques
         state.set_meta('full_feed_reconciled', {'at': utcnow().isoformat(), 'project': project,
             'posts': len(posts), 'release_inventories': inventories})
     state.set_meta("last_run", {"at": utcnow().isoformat(), "project": project, "config": config.fingerprint,
-        "failures": failures, "questions_considered": attempted, "unsupported_posts": skipped})
+        "failures": failures, "questions_considered": attempted, "unsupported_posts": skipped,
+        "workflow_run_id": workflow_run_id, "workflow_run_attempt": workflow_run_attempt,
+        "operation_started_at": operation_started_at})
     result = state.summary(project)
     result["release_inventory_counts"] = export_counts
     result["rate_limit_circuit_open"] = bool(getattr(model, "rate_limit_circuit_opened", False))
@@ -200,7 +203,13 @@ def main():
                 if args.mode == "live":
                     live_gate(config, state)
                 remote, model = services(config, state)
-                result = run(config, state, remote, model, practice=args.mode == "practice", max_questions=args.max_questions)
+                workflow_run_id = os.getenv("BOT_WORKFLOW_RUN_ID", "")
+                workflow_run_attempt = os.getenv("BOT_WORKFLOW_RUN_ATTEMPT", "")
+                operation_started_at = os.getenv("BOT_OPERATION_STARTED_AT", "")
+                result = run(config, state, remote, model, practice=args.mode == "practice", max_questions=args.max_questions,
+                    workflow_run_id=workflow_run_id if workflow_run_id.isdigit() else None,
+                    workflow_run_attempt=workflow_run_attempt if workflow_run_attempt.isdigit() else None,
+                    operation_started_at=operation_started_at or None)
                 print(canonical(result))
                 if result["failures"]:
                     return 1

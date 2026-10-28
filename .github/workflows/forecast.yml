@@ -31,15 +31,19 @@ jobs:
       PYTHONUTF8: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        id: checkout
         with:
           fetch-depth: 1
           persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        id: setup_python
         with:
           python-version: '3.12'
       - name: Install pinned direct dependencies
+        id: install_dependencies
         run: python -m pip install -r requirements.txt
       - name: Fetch immutable readiness verification baseline
+        id: verify_baseline
         shell: bash
         run: |
           set -eu
@@ -48,12 +52,45 @@ jobs:
           git fetch --no-tags --depth=1 origin "$baseline_commit"
           test "$(git rev-parse "${baseline_commit}^{tree}")" = "$expected_tree"
       - name: Verify reliability for this source and configuration
+        id: verify_reliability
         run: python scripts/verify.py
       - name: Restore encrypted durable progress
+        id: restore_progress
         run: python -m futureeval_bot.cloud restore
       - name: Record current verification
+        id: record_verification
         run: python -m futureeval_bot record-offline-checks
       - name: Run selected operation
+        id: run_selected_operation
         env:
           REQUESTED_MODE: ${{ inputs.mode || 'live' }}
-        run: python -m futureeval_bot "$REQUESTED_MODE" --max-questions 5
+          BOT_WORKFLOW_RUN_ID: ${{ github.run_id }}
+          BOT_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+          BOT_SOURCE_SHA: ${{ github.sha }}
+        run: |
+          BOT_OPERATION_STARTED_AT="$(date -u +'%Y-%m-%dT%H:%M:%SZ')" || BOT_OPERATION_STARTED_AT=''
+          export BOT_OPERATION_STARTED_AT
+          echo "BOT_OPERATION_STARTED_AT=$BOT_OPERATION_STARTED_AT" >> "$GITHUB_ENV" || true
+          python -m futureeval_bot "$REQUESTED_MODE" --max-questions 5
+      - name: Publish sanitized operational summary
+        if: always()
+        continue-on-error: true
+        env:
+          METACULUS_TOKEN: ''
+          OPENROUTER_API_KEY: ''
+          GITHUB_TOKEN: ''
+          BOT_OPERATION_STARTED_AT: ${{ env.BOT_OPERATION_STARTED_AT || '' }}
+          BOT_WORKFLOW_RUN_ID: ${{ github.run_id }}
+          BOT_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+          BOT_OPERATION_OUTCOME: ${{ steps.run_selected_operation.outcome || 'unknown' }}
+          BOT_OPERATION_MODE: ${{ inputs.mode || 'live' }}
+          BOT_TRIGGER_EVENT: ${{ github.event_name }}
+          BOT_SOURCE_SHA: ${{ github.sha }}
+          BOT_STEP_CHECKOUT_OUTCOME: ${{ steps.checkout.outcome || 'unknown' }}
+          BOT_STEP_SETUP_PYTHON_OUTCOME: ${{ steps.setup_python.outcome || 'unknown' }}
+          BOT_STEP_INSTALL_OUTCOME: ${{ steps.install_dependencies.outcome || 'unknown' }}
+          BOT_STEP_BASELINE_OUTCOME: ${{ steps.verify_baseline.outcome || 'unknown' }}
+          BOT_STEP_VERIFY_OUTCOME: ${{ steps.verify_reliability.outcome || 'unknown' }}
+          BOT_STEP_RESTORE_OUTCOME: ${{ steps.restore_progress.outcome || 'unknown' }}
+          BOT_STEP_RECORD_OUTCOME: ${{ steps.record_verification.outcome || 'unknown' }}
+        run: python -m futureeval_bot.operational_summary
