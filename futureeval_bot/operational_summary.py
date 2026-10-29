@@ -7,6 +7,7 @@ import os
 import re
 import sqlite3
 from collections import Counter
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -152,6 +153,10 @@ def _context(env: dict[str, str], config_path: str | Path) -> dict:
         "window_recorded_cost_sum_usd": None,
         "window_aggregate_status": "unknown",
         "cost_halt_status": "unknown",
+        "delivery_proof_status": "unknown",
+        "delivery_proof_observed_rows": None,
+        "delivery_proof_scope": None,
+        "delivery_proof_counts": None,
     }
     return base, start, finish, run_id, attempt
 
@@ -167,7 +172,7 @@ def collect_summary(database: str | Path, *, config_path: str | Path = "config.j
         return result
     try:
         uri = db_path.resolve().as_uri() + "?mode=ro"
-        with sqlite3.connect(uri, uri=True, timeout=2) as db:
+        with closing(sqlite3.connect(uri, uri=True, timeout=2)) as db:
             db.execute("PRAGMA query_only=ON")
             lifetime_phases = Counter()
             for (phase,) in db.execute("SELECT phase FROM jobs"):
@@ -178,6 +183,16 @@ def collect_summary(database: str | Path, *, config_path: str | Path = "config.j
             ).fetchone()
             raw_meta = dict(db.execute("SELECT key,value FROM meta WHERE key IN (?,?)",
                                        ("last_run", "cost_guard_halt")).fetchall())
+            proof_table = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", ("delivery_proof",)
+            ).fetchone()
+            if proof_table and run_id and attempt:
+                delivery_rows = db.execute(
+                    "SELECT paired,status FROM delivery_proof "
+                    "WHERE workflow_run_id=? AND workflow_run_attempt=?", (run_id, attempt)
+                ).fetchall()
+            else:
+                delivery_rows = None
             if start:
                 window_calls = db.execute(
                     "SELECT COUNT(*), COUNT(cost), COALESCE(SUM(CASE WHEN cost IS NULL THEN 1 ELSE 0 END),0), "
@@ -218,6 +233,22 @@ def collect_summary(database: str | Path, *, config_path: str | Path = "config.j
         result["failure_type_counts"] = dict(sorted(types.items()))
         result["validation_failure_categories"] = dict(sorted(validation.items()))
         result["request_failure_categories"] = dict(sorted(requests.items()))
+        if delivery_rows is not None:
+            proof_counts = Counter()
+            paired_count = 0
+            for paired, status in delivery_rows:
+                if paired == 1:
+                    paired_count += 1
+                proof_counts[status if status in {"on_time", "late", "unknown"} else "unknown"] += 1
+            result["delivery_proof_status"] = "available"
+            result["delivery_proof_observed_rows"] = len(delivery_rows)
+            result["delivery_proof_scope"] = "run_observed_subset_not_released_question_or_seasonal_denominator"
+            result["delivery_proof_counts"] = {
+                "paired": paired_count,
+                "on_time": proof_counts["on_time"],
+                "late": proof_counts["late"],
+                "unknown": proof_counts["unknown"],
+            }
 
     result["lifetime_phase_counts"] = dict(sorted(lifetime_phases.items()))
     result["lifetime_calls"] = int(lifetime_calls[0])

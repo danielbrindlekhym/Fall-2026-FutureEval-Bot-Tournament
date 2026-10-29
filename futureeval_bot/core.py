@@ -102,16 +102,35 @@ class Contract:
     unit: str | None = None
     status: str = "open"
     staff_clarifications: list[str] = field(default_factory=list)
+    # None means this contract predates proof-boundary provenance. Forecast
+    # behavior continues to use close_time exactly as before.
+    close_boundary_conflict: bool | None = None
 
     @classmethod
     def from_post(cls, post: dict, project: int) -> Contract:
         q = post.get("question")
         if not q or q.get("type") not in SUPPORTED:
             raise ValueError("Unsupported post/question type")
-        close = q.get("actual_close_time") or q.get("scheduled_close_time") or post.get("scheduled_close_time")
+        actual_close = q.get("actual_close_time")
+        question_scheduled_close = q.get("scheduled_close_time")
+        post_scheduled_close = post.get("scheduled_close_time")
+        scheduled_close = question_scheduled_close or post_scheduled_close
+        close = actual_close or scheduled_close
         if not close:
             raise ValueError("Missing question closing timestamp")
         timestamp(close)
+        close_conflict = False
+        if actual_close is not None:
+            if not isinstance(actual_close, str) or not actual_close:
+                close_conflict = None
+        elif question_scheduled_close and post_scheduled_close:
+            # These are duplicate scheduled boundaries in the same fallback
+            # tier. A disagreement is ambiguous; actual_close_time, when set,
+            # remains authoritative over the scheduled value by contract.
+            try:
+                close_conflict = timestamp(question_scheduled_close) != timestamp(post_scheduled_close)
+            except (TypeError, ValueError, AttributeError):
+                close_conflict = True
         return cls(
             question_id=int(q["id"]), post_id=int(post["id"]), kind=q["type"],
             title=q.get("title") or post.get("title", ""),
@@ -124,6 +143,7 @@ class Contract:
             open_upper_bound=bool(q.get("open_upper_bound", False)),
             unit=q.get("unit") or q.get("unit_of_measure"),
             status=q.get("status") or post.get("status") or "open",
+            close_boundary_conflict=close_conflict,
         )
 
     def remaining(self, now: datetime | None = None) -> float:
@@ -159,6 +179,10 @@ class State:
             CREATE TABLE IF NOT EXISTS calls(
                 id INTEGER PRIMARY KEY, question_id INTEGER NOT NULL, day TEXT NOT NULL,
                 model TEXT NOT NULL, status TEXT NOT NULL, response TEXT, cost REAL, created TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS delivery_proof(
+                question_id INTEGER PRIMARY KEY, workflow_run_id TEXT, workflow_run_attempt TEXT,
+                paired INTEGER NOT NULL CHECK(paired IN (0,1)),
+                status TEXT NOT NULL CHECK(status IN ('on_time','late','unknown')));
         """)
         self.db.commit()
 
@@ -207,6 +231,24 @@ class State:
         with self.db:
             self.db.execute("UPDATE jobs SET " + ",".join(f"{key}=?" for key in values) + " WHERE question_id=?",
                 (*values.values(), question_id))
+        self.persist()
+
+    def record_delivery_proof(self, question_id: int, *, workflow_run_id: str | None,
+                              workflow_run_attempt: str | None, paired: bool, status: str):
+        if type(paired) is not bool or status not in {"on_time", "late", "unknown"}:
+            raise ValueError("Invalid delivery proof status")
+        if not (isinstance(workflow_run_id, str) and workflow_run_id.isdigit()
+                and len(workflow_run_id) <= 24):
+            workflow_run_id = None
+        if not (isinstance(workflow_run_attempt, str) and workflow_run_attempt.isdigit()
+                and len(workflow_run_attempt) <= 8):
+            workflow_run_attempt = None
+        with self.db:
+            self.db.execute(
+                "INSERT OR REPLACE INTO delivery_proof "
+                "(question_id,workflow_run_id,workflow_run_attempt,paired,status) VALUES(?,?,?,?,?)",
+                (question_id, workflow_run_id, workflow_run_attempt, int(paired), status),
+            )
         self.persist()
 
     def reserve_call(self, question_id: int, model: str, config: Config, *, cost_receipt_guard=False) -> int:
