@@ -230,7 +230,7 @@ def test_export_error_preserves_actual_job_success_or_failure(tmp_path, monkeypa
     state.set_meta('full_feed_reconciled',saved)
     monkeypatch.setattr(entry,'live_gate',lambda *args:None)
     handled=[]
-    def submit(state,remote,question_id):
+    def submit(state,remote,question_id,*,workflow_run_id=None,workflow_run_attempt=None):
         handled.append(question_id)
         if submission_fails:
             raise RuntimeError('Synthetic submission failure')

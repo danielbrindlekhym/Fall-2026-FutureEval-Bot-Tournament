@@ -45,6 +45,7 @@ def saved(state, q=None):
 class FakeRemote:
     def __init__(self, q, payload=None, comment=False, lose_pair_receipt=False, fail_comment=False):
         self.q = q
+        self.user_id = 310267  # Synthetic configured identity used by Config().
         self.values = expected_values(q, payload) if payload else None
         self.has_comment = comment
         self.lose_pair_receipt = lose_pair_receipt

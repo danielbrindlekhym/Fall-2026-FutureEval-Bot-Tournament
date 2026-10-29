@@ -232,7 +232,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 2
+          fetch-depth: 3
           persist-credentials: false
 
       - name: Assert exact PR14 base, tree, paths, and accepted source bytes
@@ -243,13 +243,17 @@ jobs:
           test "$GITHUB_BASE_REF" = "main"
           approved_base='ef4897da51bb915deefafd6701961c14ed9d7f1b'
           approved_base_tree='a0b9aba4aaa52585580ba2577341d99ce127ec74'
+          published_pr14_head='c6588cba34700aebec50a6d02d6f9bd1f22e7da7'
+          readiness_history='f0a423142e6ccb499ba483fe769b8cfcb8e88b30'
           test "$EXPECTED_BASE_SHA" = "$approved_base"
           git fetch --no-tags --depth=1 origin "$approved_base"
+          git fetch --no-tags --depth=1 origin "$readiness_history"
           test "$(git rev-parse "${approved_base}^{tree}")" = "$approved_base_tree"
           actual_head="$(git rev-parse HEAD)"
           test "$actual_head" = "$EXPECTED_HEAD_SHA"
+          test "$(git rev-parse HEAD^)" = "$published_pr14_head"
           test "$(git merge-base "$approved_base" HEAD)" = "$approved_base"
-          expected_paths=$'.github/workflows/offline-verification.yml\nfutureeval_bot/__main__.py\nfutureeval_bot/api.py\nfutureeval_bot/core.py\nfutureeval_bot/operational_summary.py\ntests/test_delivery_proof.py'
+          expected_paths=$'.github/workflows/offline-verification.yml\nfutureeval_bot/__main__.py\nfutureeval_bot/api.py\nfutureeval_bot/core.py\nfutureeval_bot/operational_summary.py\ntests/test_bot.py\ntests/test_delivery_proof.py\ntests/test_inventory.py\ntests/test_operational_summary_v2.py\ntests/test_rate_limit_circuit.py'
           actual_paths="$(git diff --name-only "$approved_base"...HEAD | LC_ALL=C sort)"
           test "$actual_paths" = "$expected_paths"
           python - <<'PY'
@@ -263,7 +267,11 @@ jobs:
               'futureeval_bot/core.py': '853ba288d1bdc56a158c5bb7ff694968051c10a9f6cc5a9b255c03e9afd0294d',
               'futureeval_bot/operational_summary.py': '418c351a7eed2d054788827ffcf81bffeb95a061052a17e24b518a98f84db65b',
               'futureeval_bot/__main__.py': 'b2a43bcd427144d44d04207def8a27be87c7ec0079588a85e25912231ef10db5',
+              'tests/test_bot.py': '92d13d41bf06aaa260032a75f9e5e18093fe6bb8f1833fc43a69aedb6683a182',
               'tests/test_delivery_proof.py': '2b8da1fb43354fef0067b62e4d03c68874d7a1a2f85ee86c14427ae2c706a4ca',
+              'tests/test_inventory.py': 'bb56ce28691be32b049f3b099a37bfa1d75b2a284defddf83e3835a806abe2bc',
+              'tests/test_operational_summary_v2.py': '5a4540f758c0940f6f877ffadd44c47a7b39b7481d0ea44d7ac581b011365ad4',
+              'tests/test_rate_limit_circuit.py': '2fa7353b0c3c31e1dbbbe2dcae52eec2e09d1ff8f4d07f474287e9095d9611b3',
           }
           for name, wanted in expected.items():
               path = Path(name)
