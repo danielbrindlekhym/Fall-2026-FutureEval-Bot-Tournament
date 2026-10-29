@@ -219,7 +219,7 @@ def reconcile_and_submit(state: State, remote: Metaculus, question_id: int, *,
         return
     if not job["payload"] or not job["explanation"]:
         raise ValueError("No frozen forecast and reasoning to submit")
-    contract = Contract(**json.loads(job["contract"]))
+    contract = state.contract(question_id)
     payload = json.loads(job["payload"])
     marker = job["explanation"].splitlines()[0]
 

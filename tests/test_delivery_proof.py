@@ -1,7 +1,9 @@
+import hashlib
 import json
 import sys
 import tempfile
 import unittest
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -49,6 +51,25 @@ def comment(created_at, *, author_id=BOT_ID, on_post=600, is_private=True, text=
 
 def unix(value):
     return value.timestamp()
+
+
+class RollbackContract:
+    """Strict constructor shape from rollback commit 1c9fc16 (core.py)."""
+    fields = (
+        "question_id", "post_id", "kind", "title", "background", "resolution",
+        "fine_print", "close_time", "open_time", "project", "options", "scaling",
+        "open_lower_bound", "open_upper_bound", "unit", "status", "staff_clarifications",
+    )
+
+    def __init__(self, **values):
+        unexpected = values.keys() - set(self.fields)
+        if unexpected:
+            name = sorted(unexpected)[0]
+            raise TypeError(f"unexpected keyword argument: {name}")
+        missing = set(self.fields[:10]) - values.keys()
+        if missing:
+            raise TypeError(f"missing required argument: {sorted(missing)[0]}")
+        self.values = values
 
 
 class DeliveryProofTests(unittest.TestCase):
@@ -142,6 +163,311 @@ class DeliveryProofTests(unittest.TestCase):
         before = CLOSE - timedelta(seconds=1)
         self.assertEqual(self.classify(forecast(unix(before)), comment(before.isoformat()),
                                        contract_value=parsed), (True, "unknown"))
+
+    def test_frozen_contract_json_stays_compatible_with_pinned_rollback_constructor(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            state = State(Path(directory) / "bot.db")
+            c = contract(close_boundary_conflict=False)
+            state.discover(c, Config())
+            job = state.job(c.question_id)
+            saved = json.loads(job["contract"])
+            self.assertNotIn("close_boundary_conflict", saved)
+            rollback_contract = RollbackContract(**saved)
+            # Match the rollback run-loop fallback expression: it succeeds even
+            # when the just-discovered contract mapping already has this id.
+            selected = {c.question_id: rollback_contract}.get(
+                c.question_id, RollbackContract(**saved)
+            )
+            self.assertIs(selected, rollback_contract)
+            self.assertEqual(state.contract(c.question_id).close_boundary_conflict, False)
+            key = state._contract_provenance_key(c.question_id)
+            provenance = state.meta(key)
+            self.assertEqual(provenance["close_boundary_conflict"], False)
+            from futureeval_bot.cloud import signature
+            signed = signature(state.db)
+            state.db.execute("DELETE FROM meta WHERE key=?", (key,))
+            state.db.commit()
+            self.assertNotEqual(signature(state.db), signed,
+                                "contract provenance must participate in checkpoint CAS")
+            state.close()
+
+    def test_new_on_time_provenance_survives_reopen_and_reconciliation(self):
+        class FakeRemote:
+            user_id = BOT_ID
+            def __init__(self, forecast_time, comment_time):
+                self.forecast_time = forecast_time
+                self.comment_time = comment_time
+                self.forecast_reads = self.comment_reads = self.post_reads = self.submissions = 0
+            def forecasts(self, question_id):
+                self.forecast_reads += 1
+                return [forecast(unix(self.forecast_time))]
+            def comments(self, post_id):
+                self.comment_reads += 1
+                return [comment(self.comment_time.isoformat())]
+            def post(self, post_id):
+                self.post_reads += 1
+                raise AssertionError("complete receipt pair must not reread post")
+            def submit_pair(self, *args): self.submissions += 1
+            def submit_comment(self, *args): self.submissions += 1
+            def submit_forecast(self, *args): self.submissions += 1
+
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            cases = (
+                (CLOSE - timedelta(seconds=2), CLOSE - timedelta(seconds=1), "on_time"),
+                (CLOSE, CLOSE - timedelta(seconds=1), "late"),
+                (CLOSE - timedelta(seconds=2), CLOSE, "late"),
+                (CLOSE - timedelta(seconds=2), CLOSE + timedelta(seconds=1), "late"),
+            )
+            for index, (forecast_time, comment_time, expected_status) in enumerate(cases):
+                with self.subTest(expected_status=expected_status, forecast_time=forecast_time,
+                                  comment_time=comment_time):
+                    path = Path(directory) / f"bot-{index}.db"
+                    state = State(path)
+                    values = contract(close_boundary_conflict=False).as_dict()
+                    values["question_id"] = 501 + index
+                    c = Contract(**values)
+                    state.discover(c, Config())
+                    state.update(c.question_id, phase="forecasted", payload=canonical(PAYLOAD),
+                                 explanation=MARKER + "\nsynthetic reasoning")
+                    frozen = {key: state.job(c.question_id)[key]
+                              for key in ("contract", "config", "payload", "explanation", "samples")}
+                    state.close()
+
+                    reopened = State(path)
+                    remote = FakeRemote(forecast_time, comment_time)
+                    reconcile_and_submit(reopened, remote, c.question_id,
+                                         workflow_run_id=RUN_ID, workflow_run_attempt=ATTEMPT)
+                    row = reopened.db.execute(
+                        "SELECT paired,status FROM delivery_proof WHERE question_id=?", (c.question_id,)
+                    ).fetchone()
+                    self.assertEqual(tuple(row), (1, expected_status))
+                    self.assertEqual((remote.forecast_reads, remote.comment_reads, remote.post_reads,
+                                      remote.submissions), (1, 1, 0, 0))
+                    self.assertEqual({key: reopened.job(c.question_id)[key] for key in frozen}, frozen)
+                    self.assertEqual(reopened.db.execute("SELECT COUNT(*) FROM calls").fetchone()[0], 0)
+                    reopened.close()
+
+    def test_ambiguous_and_legacy_missing_provenance_stay_unknown_without_submission(self):
+        class FakeRemote:
+            user_id = BOT_ID
+            def __init__(self):
+                self.submissions = 0
+                self.forecast_reads = self.comment_reads = self.post_reads = 0
+                self.forecast_rows = [forecast(unix(CLOSE - timedelta(seconds=2)))]
+                self.comment_rows = [comment((CLOSE - timedelta(seconds=1)).isoformat())]
+            def forecasts(self, question_id): self.forecast_reads += 1; return self.forecast_rows
+            def comments(self, post_id): self.comment_reads += 1; return self.comment_rows
+            def post(self, post_id):
+                self.post_reads += 1
+                raise AssertionError("complete receipt pair must not reread post")
+            def submit_pair(self, *args): self.submissions += 1
+            def submit_comment(self, *args): self.submissions += 1
+            def submit_forecast(self, *args): self.submissions += 1
+
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            # New but ambiguous provenance is represented by SQL NULL.
+            ambiguous_path = Path(directory) / "ambiguous.db"
+            state = State(ambiguous_path)
+            c = contract(close_boundary_conflict=None)
+            state.discover(c, Config())
+            state.update(c.question_id, phase="forecasted", payload=canonical(PAYLOAD),
+                         explanation=MARKER + "\nsynthetic reasoning")
+            state.close()
+            reopened = State(ambiguous_path)
+            remote = FakeRemote()
+            before = (json.dumps(remote.forecast_rows, sort_keys=True),
+                      json.dumps(remote.comment_rows, sort_keys=True))
+            reconcile_and_submit(reopened, remote, c.question_id,
+                                 workflow_run_id=RUN_ID, workflow_run_attempt=ATTEMPT)
+            row = reopened.db.execute(
+                "SELECT paired,status FROM delivery_proof WHERE question_id=?", (c.question_id,)
+            ).fetchone()
+            self.assertEqual(tuple(row), (1, "unknown"))
+            self.assertEqual(remote.submissions, 0)
+            self.assertEqual((remote.forecast_reads, remote.comment_reads, remote.post_reads), (1, 1, 0))
+            self.assertEqual(before, (json.dumps(remote.forecast_rows, sort_keys=True),
+                                      json.dumps(remote.comment_rows, sort_keys=True)))
+            reopened.close()
+
+            # A database created before this feature has no provenance record;
+            # absent evidence is not converted to False.
+            legacy_path = Path(directory) / "legacy.db"
+            raw = sqlite3.connect(legacy_path)
+            raw.execute("CREATE TABLE jobs(question_id INTEGER PRIMARY KEY, project INTEGER NOT NULL, contract TEXT NOT NULL, config TEXT NOT NULL, phase TEXT NOT NULL DEFAULT 'discovered', research TEXT, payload TEXT, explanation TEXT, samples TEXT, comment_id INTEGER, error TEXT, created TEXT NOT NULL, updated TEXT NOT NULL)")
+            raw.commit()
+            raw.close()
+            legacy = State(legacy_path)
+            saved = c.as_dict()
+            saved.pop("close_boundary_conflict")
+            legacy.db.execute(
+                "INSERT INTO jobs(question_id,project,contract,config,created,updated,payload,explanation,phase) VALUES(?,?,?,?,?,?,?,?,?)",
+                (c.question_id, c.project, canonical(saved), canonical({}), "created", "updated",
+                 canonical(PAYLOAD), MARKER + "\nsynthetic reasoning", "forecasted"),
+            )
+            legacy.db.commit()
+            legacy.close()
+            legacy = State(legacy_path)
+            self.assertIsNone(legacy.contract(c.question_id).close_boundary_conflict)
+            remote = FakeRemote()
+            reconcile_and_submit(legacy, remote, c.question_id,
+                                 workflow_run_id=RUN_ID, workflow_run_attempt=ATTEMPT)
+            row = legacy.db.execute(
+                "SELECT paired,status FROM delivery_proof WHERE question_id=?", (c.question_id,)
+            ).fetchone()
+            self.assertEqual(tuple(row), (1, "unknown"))
+            self.assertEqual(remote.submissions, 0)
+            self.assertEqual((remote.forecast_reads, remote.comment_reads, remote.post_reads), (1, 1, 0))
+            legacy.close()
+
+    def test_malformed_and_wrong_job_provenance_stay_unknown(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            state = State(Path(directory) / "bot.db")
+            first = contract(close_boundary_conflict=False)
+            state.discover(first, Config())
+            second_values = first.as_dict()
+            second_values.update(question_id=502, post_id=601, close_boundary_conflict=None)
+            second = Contract(**second_values)
+            state.discover(second, Config())
+            third_values = first.as_dict()
+            third_values.update(question_id=503, post_id=602, close_boundary_conflict=True)
+            third = Contract(**third_values)
+            state.discover(third, Config())
+
+            first_key = state._contract_provenance_key(first.question_id)
+            valid_first_provenance = state.meta(first_key)
+            first_contract = json.loads(state.job(first.question_id)["contract"])
+            first_digest = hashlib.sha256(canonical(first_contract).encode()).hexdigest()
+            state.set_meta(first_key, {"contract_sha256": first_digest,
+                                       "close_boundary_conflict": 0})
+            self.assertIsNone(state.contract(first.question_id).close_boundary_conflict)
+
+            second_key = state._contract_provenance_key(second.question_id)
+            state.set_meta(second_key, valid_first_provenance)
+            self.assertIsNone(state.contract(second.question_id).close_boundary_conflict)
+            state.close()
+            state = State(Path(directory) / "bot.db")
+            self.assertIsNone(state.contract(first.question_id).close_boundary_conflict)
+            self.assertIsNone(state.contract(second.question_id).close_boundary_conflict)
+            self.assertIs(state.contract(third.question_id).close_boundary_conflict, True)
+
+            class FakeRemote:
+                user_id = BOT_ID
+                def __init__(self):
+                    self.forecast_reads = self.comment_reads = self.submissions = 0
+                    self.forecast_rows = [forecast(unix(CLOSE - timedelta(seconds=2)))]
+                    self.comment_rows = [comment((CLOSE - timedelta(seconds=1)).isoformat())]
+                def forecasts(self, question_id):
+                    self.forecast_reads += 1
+                    return self.forecast_rows
+                def comments(self, post_id):
+                    self.comment_reads += 1
+                    return [comment(self.comment_rows[0]["created_at"], on_post=post_id)]
+                def post(self, post_id): raise AssertionError("complete pair must not reread post")
+                def submit_pair(self, *args): self.submissions += 1
+                def submit_comment(self, *args): self.submissions += 1
+                def submit_forecast(self, *args): self.submissions += 1
+
+            for c in (first, second, third):
+                state.update(c.question_id, phase="forecasted", payload=canonical(PAYLOAD),
+                             explanation=MARKER + "\nsynthetic reasoning")
+            remote = FakeRemote()
+            before_receipts = (json.dumps(remote.forecast_rows, sort_keys=True),
+                               json.dumps(remote.comment_rows, sort_keys=True))
+            for c in (first, second, third):
+                reconcile_and_submit(state, remote, c.question_id,
+                                     workflow_run_id=RUN_ID, workflow_run_attempt=ATTEMPT)
+                row = state.db.execute(
+                    "SELECT paired,status FROM delivery_proof WHERE question_id=?", (c.question_id,)
+                ).fetchone()
+                self.assertEqual(tuple(row), (1, "unknown"))
+            self.assertEqual((remote.forecast_reads, remote.comment_reads, remote.submissions), (3, 3, 0))
+            self.assertEqual(before_receipts, (json.dumps(remote.forecast_rows, sort_keys=True),
+                                               json.dumps(remote.comment_rows, sort_keys=True)))
+            state.close()
+
+    def test_optional_proof_telemetry_failure_does_not_change_reconciliation(self):
+        class NoTelemetryState(State):
+            def record_delivery_proof(self, *args, **kwargs):
+                raise OSError("synthetic telemetry persistence failure")
+
+        class FakeRemote:
+            user_id = BOT_ID
+            def __init__(self): self.reads = 0; self.submissions = 0
+            def forecasts(self, question_id):
+                self.reads += 1
+                return [forecast(unix(CLOSE - timedelta(seconds=2)))]
+            def comments(self, post_id):
+                self.reads += 1
+                return [comment((CLOSE - timedelta(seconds=1)).isoformat())]
+            def post(self, post_id): raise AssertionError("complete pair must not reread post")
+            def submit_pair(self, *args): self.submissions += 1
+            def submit_comment(self, *args): self.submissions += 1
+            def submit_forecast(self, *args): self.submissions += 1
+
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            state = NoTelemetryState(Path(directory) / "bot.db")
+            c = contract(close_boundary_conflict=False)
+            state.discover(c, Config())
+            state.update(c.question_id, phase="forecasted", payload=canonical(PAYLOAD),
+                         explanation=MARKER + "\nsynthetic reasoning")
+            remote = FakeRemote()
+            reconcile_and_submit(state, remote, c.question_id,
+                                 workflow_run_id=RUN_ID, workflow_run_attempt=ATTEMPT)
+            self.assertEqual((remote.reads, remote.submissions), (2, 0))
+            self.assertEqual(state.job(c.question_id)["phase"], "verified")
+            state.close()
+
+    def test_optional_contract_provenance_write_failure_preserves_job_and_reconcile(self):
+        class FakeRemote:
+            user_id = BOT_ID
+            def __init__(self):
+                self.forecast_reads = self.comment_reads = self.post_reads = self.submissions = 0
+            def forecasts(self, question_id):
+                self.forecast_reads += 1
+                return [forecast(unix(CLOSE - timedelta(seconds=2)))]
+            def comments(self, post_id):
+                self.comment_reads += 1
+                return [comment((CLOSE - timedelta(seconds=1)).isoformat(), on_post=post_id)]
+            def post(self, post_id):
+                self.post_reads += 1
+                raise AssertionError("complete receipt pair must not reread post")
+            def submit_pair(self, *args): self.submissions += 1
+            def submit_comment(self, *args): self.submissions += 1
+            def submit_forecast(self, *args): self.submissions += 1
+
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            path = Path(directory) / "bot.db"
+            state = State(path)
+            c = contract(close_boundary_conflict=False)
+            state.db.execute("""
+                CREATE TRIGGER reject_contract_provenance
+                BEFORE INSERT ON meta
+                WHEN NEW.key GLOB 'contract_close_boundary_provenance:*'
+                BEGIN SELECT RAISE(ABORT, 'synthetic optional sidecar failure'); END
+            """)
+            state.db.commit()
+
+            state.discover(c, Config())
+            saved = state.job(c.question_id)
+            self.assertEqual(saved["phase"], "discovered")
+            self.assertNotIn("close_boundary_conflict", json.loads(saved["contract"]))
+            self.assertIsNone(state.contract(c.question_id).close_boundary_conflict)
+            self.assertIsNone(state.meta(state._contract_provenance_key(c.question_id)))
+            state.update(c.question_id, phase="forecasted", payload=canonical(PAYLOAD),
+                         explanation=MARKER + "\nsynthetic reasoning")
+            state.close()
+
+            reopened = State(path)
+            self.assertIsNone(reopened.contract(c.question_id).close_boundary_conflict)
+            remote = FakeRemote()
+            reconcile_and_submit(reopened, remote, c.question_id,
+                                 workflow_run_id=RUN_ID, workflow_run_attempt=ATTEMPT)
+            self.assertEqual((remote.forecast_reads, remote.comment_reads, remote.post_reads,
+                              remote.submissions), (1, 1, 0, 0))
+            self.assertEqual(reopened.job(c.question_id)["phase"], "verified")
+            self.assertEqual(reopened.db.execute("SELECT COUNT(*) FROM calls").fetchone()[0], 0)
+            self.assertIsNone(reopened.contract(c.question_id).close_boundary_conflict)
+            reopened.close()
 
     def test_reconcile_uses_only_existing_two_receipt_reads(self):
         class FakeRemote:

@@ -85,7 +85,9 @@ def run(config: Config, state: State, remote, model, *, practice=False, max_ques
     for job in state.jobs(project):
         if job["phase"] in {"verified", "external_forecast", "missed"}:
             continue
-        contract = contracts.get(job["question_id"], Contract(**json.loads(job["contract"])))
+        contract = contracts.get(job["question_id"])
+        if contract is None:
+            contract = state.contract(job["question_id"])
         if job["payload"]:
             work.append((0, contract, job))
         elif contract.question_id in wanted:

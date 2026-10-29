@@ -204,10 +204,62 @@ class State:
 
     def discover(self, contract: Contract, config: Config):
         now = utcnow().isoformat()
+        saved_contract = contract.as_dict()
+        close_conflict = saved_contract.pop("close_boundary_conflict", None)
+        contract_json = canonical(saved_contract)
+        provenance = {
+            "contract_sha256": hashlib.sha256(contract_json.encode()).hexdigest(),
+            "close_boundary_conflict": close_conflict if type(close_conflict) is bool else None,
+        }
         with self.db:
-            self.db.execute("INSERT OR IGNORE INTO jobs(question_id,project,contract,config,created,updated) VALUES(?,?,?,?,?,?)",
-                (contract.question_id, contract.project, canonical(contract.as_dict()), canonical(asdict(config)), now, now))
+            inserted = self.db.execute(
+                "INSERT OR IGNORE INTO jobs "
+                "(question_id,project,contract,config,created,updated) VALUES(?,?,?,?,?,?)",
+                (contract.question_id, contract.project, contract_json,
+                 canonical(asdict(config)), now, now),
+            ).rowcount == 1
+            if inserted:
+                # The existing meta table participates in the encrypted checkpoint
+                # signature. A question-specific key plus frozen-contract digest
+                # binds tri-state provenance without changing rollback-visible JSON.
+                self.db.execute("SAVEPOINT optional_contract_provenance")
+                try:
+                    self.db.execute(
+                        "INSERT OR IGNORE INTO meta(key,value) VALUES(?,?)",
+                        (self._contract_provenance_key(contract.question_id), canonical(provenance)),
+                    )
+                except sqlite3.Error:
+                    # Provenance is optional. Roll back only its sidecar write;
+                    # mandatory job persistence and the outer transaction still
+                    # fail normally if SQLite cannot commit or persist the job.
+                    self.db.execute("ROLLBACK TO SAVEPOINT optional_contract_provenance")
+                finally:
+                    self.db.execute("RELEASE SAVEPOINT optional_contract_provenance")
         self.persist()
+
+    @staticmethod
+    def _contract_provenance_key(question_id: int) -> str:
+        return f"contract_close_boundary_provenance:{question_id}"
+
+    def contract(self, question_id: int) -> Contract:
+        """Load the frozen rollback-compatible contract and its row-bound provenance."""
+        job = self.job(question_id)
+        contract_json = job["contract"]
+        saved = json.loads(contract_json)
+        saved.pop("close_boundary_conflict", None)
+        value = None
+        try:
+            provenance = self.meta(self._contract_provenance_key(question_id))
+            expected_hash = hashlib.sha256(canonical(saved).encode()).hexdigest()
+            if (isinstance(provenance, dict)
+                    and set(provenance) == {"contract_sha256", "close_boundary_conflict"}
+                    and provenance.get("contract_sha256") == expected_hash
+                    and type(provenance.get("close_boundary_conflict")) is bool):
+                value = provenance["close_boundary_conflict"]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            value = None
+        saved["close_boundary_conflict"] = value
+        return Contract(**saved)
 
     def job(self, question_id: int) -> dict:
         row = self.db.execute("SELECT * FROM jobs WHERE question_id=?", (question_id,)).fetchone()
