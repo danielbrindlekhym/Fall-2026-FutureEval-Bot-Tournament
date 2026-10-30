@@ -4,6 +4,7 @@ import json
 import math
 import os
 import time
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
 import requests
@@ -143,26 +144,111 @@ def matching_forecast(contract: Contract, payload: dict, forecasts: list[dict]) 
         for a, b in zip(actual, expected))
 
 
-def reconcile_and_submit(state: State, remote: Metaculus, question_id: int):
+def _aware_iso_time(value) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            return None
+        return parsed.astimezone(timezone.utc)
+    except (OverflowError, TypeError, ValueError):
+        return None
+
+
+def _unix_time(value) -> datetime | None:
+    # Metaculus OpenAPI: UserForecast.start_time is a numeric Unix timestamp.
+    if type(value) not in (int, float):
+        return None
+    try:
+        seconds = float(value)
+        if not math.isfinite(seconds):
+            return None
+        return datetime.fromtimestamp(seconds, tz=timezone.utc)
+    except (OverflowError, OSError, TypeError, ValueError):
+        return None
+
+
+def _delivery_proof(contract: Contract, payload: dict, forecasts: list[dict], comment,
+                    marker: str, expected_bot_id) -> tuple[bool, str]:
+    """Classify only the already-fetched receipt pair; never exposes source fields."""
+    try:
+        if not forecasts:
+            return False, "unknown"
+        latest = max(forecasts, key=lambda forecast: forecast.get("start_time", 0))
+        forecast_time = _unix_time(latest.get("start_time"))
+        forecast_author = latest.get("author_id")
+        forecast_matches = matching_forecast(contract, payload, forecasts)
+        forecast_identity_matches = (
+            type(expected_bot_id) is int and expected_bot_id > 0
+            and type(forecast_author) is int and forecast_author == expected_bot_id
+        )
+
+        comment_author = comment.get("author") if isinstance(comment, dict) else None
+        comment_author_id = comment_author.get("id") if isinstance(comment_author, dict) else None
+        comment_matches = (
+            isinstance(comment, dict)
+            and type(comment_author_id) is int and comment_author_id == expected_bot_id
+            and type(comment.get("on_post")) is int and comment.get("on_post") == contract.post_id
+            and comment.get("is_private") is True
+            and isinstance(comment.get("text"), str)
+            and isinstance(marker, str) and bool(marker)
+            and comment["text"].startswith(marker)
+        )
+        paired = bool(forecast_matches and forecast_identity_matches and comment_matches)
+        if not paired:
+            return False, "unknown"
+
+        comment_time = _aware_iso_time(comment.get("created_at"))
+        close_time = _aware_iso_time(contract.close_time)
+        if (forecast_time is None or comment_time is None or close_time is None
+                or contract.close_boundary_conflict is not False):
+            return True, "unknown"
+        if forecast_time >= close_time or comment_time >= close_time:
+            return True, "late"
+        return True, "on_time"
+    except Exception:
+        # Receipt telemetry must never change the existing reconcile/submit path.
+        return False, "unknown"
+
+
+def reconcile_and_submit(state: State, remote: Metaculus, question_id: int, *,
+                         workflow_run_id=None, workflow_run_attempt=None):
     job = state.job(question_id)
     if job["phase"] == "verified":
         return
     if not job["payload"] or not job["explanation"]:
         raise ValueError("No frozen forecast and reasoning to submit")
-    contract = Contract(**json.loads(job["contract"]))
+    contract = state.contract(question_id)
     payload = json.loads(job["payload"])
     marker = job["explanation"].splitlines()[0]
+
+    def save_proof(paired, status):
+        try:
+            state.record_delivery_proof(question_id, workflow_run_id=workflow_run_id,
+                                        workflow_run_attempt=workflow_run_attempt,
+                                        paired=paired, status=status)
+        except Exception:
+            # Optional telemetry cannot interrupt the existing receipt/submit path.
+            pass
+
+    save_proof(False, "unknown")
 
     def receipts():
         forecasts = remote.forecasts(question_id)
         comments = remote.comments(contract.post_id)
         comment = next((c for c in comments if c.get("text", "").startswith(marker)), None)
         match = matching_forecast(contract, payload, forecasts)
-        if forecasts and not match:
-            raise ServiceError("A different forecast already exists; refusing to overwrite it")
-        return match, comment
+        return match, comment, forecasts
 
-    forecast_ok, comment = receipts()
+    def record_proof(forecast_ok, comment, forecasts):
+        paired, status = _delivery_proof(contract, payload, forecasts, comment, marker, remote.user_id)
+        save_proof(paired, status)
+
+    forecast_ok, comment, forecasts = receipts()
+    record_proof(forecast_ok, comment, forecasts)
+    if forecasts and not forecast_ok:
+        raise ServiceError("A different forecast already exists; refusing to overwrite it")
     if not (forecast_ok and comment):
         current = Contract.from_post(remote.post(contract.post_id), contract.project)
         if not forecast_ok and not current.forecastable():
@@ -176,7 +262,10 @@ def reconcile_and_submit(state: State, remote: Metaculus, question_id: int):
             remote.submit_comment(contract, job["explanation"])
         elif comment and not forecast_ok:
             remote.submit_forecast(contract, payload)
-        forecast_ok, comment = receipts()
+        forecast_ok, comment, forecasts = receipts()
+        record_proof(forecast_ok, comment, forecasts)
+        if forecasts and not forecast_ok:
+            raise ServiceError("A different forecast already exists; refusing to overwrite it")
     if forecast_ok and comment:
         state.update(question_id, phase="verified", comment_id=comment.get("id"), error=None)
     else:

@@ -249,7 +249,7 @@ def test_producer_has_only_allowlisted_imports_and_read_only_sqlite_access():
     # variable `requests`, while rejecting network, dotenv, bot-state and
     # dynamic-import escape routes.
     allowed_imports = {
-        "__future__", "hashlib", "json", "os", "re", "sqlite3",
+        "__future__", "hashlib", "json", "os", "re", "sqlite3", "contextlib",
         "collections", "datetime", "pathlib",
     }
     imported = set()

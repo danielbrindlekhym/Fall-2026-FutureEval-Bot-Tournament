@@ -85,7 +85,9 @@ def run(config: Config, state: State, remote, model, *, practice=False, max_ques
     for job in state.jobs(project):
         if job["phase"] in {"verified", "external_forecast", "missed"}:
             continue
-        contract = contracts.get(job["question_id"], Contract(**json.loads(job["contract"])))
+        contract = contracts.get(job["question_id"])
+        if contract is None:
+            contract = state.contract(job["question_id"])
         if job["payload"]:
             work.append((0, contract, job))
         elif contract.question_id in wanted:
@@ -97,7 +99,9 @@ def run(config: Config, state: State, remote, model, *, practice=False, max_ques
             break
         try:
             if job["payload"]:
-                reconcile_and_submit(state, remote, contract.question_id)
+                reconcile_and_submit(state, remote, contract.question_id,
+                                     workflow_run_id=workflow_run_id,
+                                     workflow_run_attempt=workflow_run_attempt)
                 attempted += 1
                 continue
             # Configurations are frozen per question, so a blocked model set can
@@ -129,7 +133,9 @@ def run(config: Config, state: State, remote, model, *, practice=False, max_ques
                 state.update(contract.question_id, research=canonical(evidence), phase="researched")
             prepare(state, contract, job_config, model, evidence, stop_at)
             model.config = previous_config
-            reconcile_and_submit(state, remote, contract.question_id)
+            reconcile_and_submit(state, remote, contract.question_id,
+                                 workflow_run_id=workflow_run_id,
+                                 workflow_run_attempt=workflow_run_attempt)
         except Exception as error:
             if 'previous_config' in locals():
                 model.config = previous_config

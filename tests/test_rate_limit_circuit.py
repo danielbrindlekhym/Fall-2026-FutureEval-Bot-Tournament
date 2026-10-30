@@ -325,7 +325,7 @@ class RateLimitLoopTests(unittest.TestCase):
                 explanation="synthetic frozen reasoning", phase="prepared")
 
         with patch.object(command, "live_gate"), patch.object(command, "prepare", side_effect=prepare_candidate) as prepare_mock, \
-             patch.object(command, "reconcile_and_submit", side_effect=lambda state, remote, qid: reconciled.append(qid)), \
+             patch.object(command, "reconcile_and_submit", side_effect=lambda state, remote, qid, **kwargs: reconciled.append(qid)), \
              patch.object(command, "release_inventory", return_value={}), patch.object(command, "inventory_counts", return_value={}), \
              patch.object(command, "research", side_effect=AssertionError("research should not run after circuit opens")):
             result = command.run(config, state, remote, model, max_questions=10)
