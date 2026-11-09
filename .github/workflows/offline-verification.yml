@@ -350,14 +350,20 @@ jobs:
       EXPECTED_PR_NUMBER: ${{ github.event.pull_request.number }}
       ACCEPTED_PARENT_SHA: d8cf8d21106f4974b331669ec1ef6d9c5ee7a4ab
       ACCEPTED_BASE_SHA: 8ce385fc68f9d0fa3ecd157b7f2706b1b0d4d28b
+      PUBLISHED_FOLLOWUP_SHA: b7979fb0871c539aefd9ad873a1d664f37b5d2b5
+      PUBLISHED_FOLLOWUP_OFFLINE_WORKFLOW_BLOB: 2d79a9a66809d92e5720fec0b14124d302dbe825
+      PUBLISHED_FOLLOWUP_DIAGNOSTICS_WORKFLOW_BLOB: 43330f2af1b68c9ce52a99231c14becf0042259c
+      PUBLISHED_FOLLOWUP_TEST_BLOB: c937f013dc1b7dae795945c273320b2c9e8e854c
       ACCEPTED_BASE_SOURCE_BLOB: 1903e3f91fb39216d2be16c3855651629a2d8479
       ACCEPTED_SOURCE_BLOB: cb3fde067f6b9594c69e3cd243dd6aa9445a3aca
+      HISTORICAL_READINESS_COMMIT: f0a423142e6ccb499ba483fe769b8cfcb8e88b30
+      HISTORICAL_READINESS_TREE: 6aab6dd6cb39d5feeebf6cf1f47a9e6f07309fd5
     steps:
       - name: Check out exact PR head without credential persistence
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 3
+          fetch-depth: 4
           persist-credentials: false
 
       - name: Assert PR15 parent, accepted source bytes, and exact changed-path allowlist
@@ -369,14 +375,29 @@ jobs:
           test "$EXPECTED_BASE_SHA" = "$ACCEPTED_BASE_SHA"
           actual_head="$(git rev-parse HEAD)"
           test "$actual_head" = "$EXPECTED_HEAD_SHA"
-          test "$(git rev-parse HEAD^)" = "$ACCEPTED_PARENT_SHA"
-          test "$(git rev-parse HEAD^^)" = "$ACCEPTED_BASE_SHA"
+          test "$(git rev-parse HEAD^)" = "$PUBLISHED_FOLLOWUP_SHA"
+          test "$(git rev-parse HEAD^^)" = "$ACCEPTED_PARENT_SHA"
+          test "$(git rev-parse HEAD^^^)" = "$ACCEPTED_BASE_SHA"
           test "$(git rev-parse "$ACCEPTED_BASE_SHA:futureeval_bot/operational_summary.py")" = "$ACCEPTED_BASE_SOURCE_BLOB"
           test "$(git rev-parse "$ACCEPTED_PARENT_SHA:futureeval_bot/operational_summary.py")" = "$ACCEPTED_SOURCE_BLOB"
+          test "$(git rev-parse "$PUBLISHED_FOLLOWUP_SHA:futureeval_bot/operational_summary.py")" = "$ACCEPTED_SOURCE_BLOB"
           test "$(git rev-parse "HEAD:futureeval_bot/operational_summary.py")" = "$ACCEPTED_SOURCE_BLOB"
-          ci_paths=$'.github/workflows/offline-verification.yml\n.github/workflows/readiness-diagnostics-offline-verification.yml\ntests/test_operational_summary_pr15_ci.py'
-          actual_ci_paths="$(git diff-tree --no-commit-id --name-only -r HEAD^ HEAD | LC_ALL=C sort)"
-          test "$actual_ci_paths" = "$ci_paths"
+          test "$(git rev-parse "$PUBLISHED_FOLLOWUP_SHA:.github/workflows/offline-verification.yml")" = "$PUBLISHED_FOLLOWUP_OFFLINE_WORKFLOW_BLOB"
+          test "$(git rev-parse "$PUBLISHED_FOLLOWUP_SHA:.github/workflows/readiness-diagnostics-offline-verification.yml")" = "$PUBLISHED_FOLLOWUP_DIAGNOSTICS_WORKFLOW_BLOB"
+          test "$(git rev-parse "$PUBLISHED_FOLLOWUP_SHA:tests/test_operational_summary_pr15_ci.py")" = "$PUBLISHED_FOLLOWUP_TEST_BLOB"
+          # Authenticate the one older tree required by unchanged baseline tests before egress is blocked.
+          git fetch --no-tags --depth=1 origin "$HISTORICAL_READINESS_COMMIT"
+          test "$(git rev-parse "$HISTORICAL_READINESS_COMMIT^{commit}")" = "$HISTORICAL_READINESS_COMMIT"
+          test "$(git rev-parse "$HISTORICAL_READINESS_COMMIT^{tree}")" = "$HISTORICAL_READINESS_TREE"
+          source_paths='futureeval_bot/operational_summary.py'
+          actual_source_paths="$(git diff --name-only "$ACCEPTED_BASE_SHA" "$ACCEPTED_PARENT_SHA" | LC_ALL=C sort)"
+          test "$actual_source_paths" = "$source_paths"
+          prior_ci_paths=$'.github/workflows/offline-verification.yml\n.github/workflows/readiness-diagnostics-offline-verification.yml\ntests/test_operational_summary_pr15_ci.py'
+          actual_prior_ci_paths="$(git diff-tree --no-commit-id --name-only -r "$PUBLISHED_FOLLOWUP_SHA^" "$PUBLISHED_FOLLOWUP_SHA" | LC_ALL=C sort)"
+          test "$actual_prior_ci_paths" = "$prior_ci_paths"
+          current_ci_paths='.github/workflows/offline-verification.yml'
+          actual_current_ci_paths="$(git diff-tree --no-commit-id --name-only -r HEAD^ HEAD | LC_ALL=C sort)"
+          test "$actual_current_ci_paths" = "$current_ci_paths"
           expected_paths=$'.github/workflows/offline-verification.yml\n.github/workflows/readiness-diagnostics-offline-verification.yml\nfutureeval_bot/operational_summary.py\ntests/test_operational_summary_pr15_ci.py'
           actual_paths="$(git diff --name-only "$ACCEPTED_BASE_SHA" HEAD | LC_ALL=C sort)"
           test "$actual_paths" = "$expected_paths"
