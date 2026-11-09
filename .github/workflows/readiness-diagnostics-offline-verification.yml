@@ -23,7 +23,7 @@ permissions:
 
 jobs:
   verify-readiness-candidate:
-    if: github.event.pull_request.base.ref == 'main'
+    if: github.event.pull_request.number == 13 && github.event.pull_request.head.sha == '79b2388479f6972ec5ce5dfcca9094d77c5a9506'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:

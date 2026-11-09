@@ -22,7 +22,7 @@ _CATEGORIES = {
     "cdf_lower_tail_invalid", "cdf_upper_tail_invalid", "cdf_bin_cap_exceeded", "validation_rejected",
     "call_allowance_exhausted", "transport_unconfirmed", "http_authentication", "http_payment_required",
     "http_forbidden", "http_not_found", "http_timeout", "http_rate_limited", "http_server_error",
-    "http_other", "request_failed",
+    "http_other", "request_failed", "rate_limit_circuit_open", "readiness_stopped",
 }
 _OUTCOMES = {"success", "failure", "cancelled", "skipped", "unknown"}
 _EVENTS = {"schedule", "workflow_dispatch", "unknown"}
