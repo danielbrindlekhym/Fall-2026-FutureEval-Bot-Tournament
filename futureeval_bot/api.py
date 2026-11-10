@@ -6,6 +6,7 @@ import os
 import time
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from urllib.parse import parse_qsl, urlsplit
 
 import requests
 
@@ -68,16 +69,54 @@ class Metaculus:
             params["statuses"] = statuses
         posts = []
         self.feed_pages = []
+        seen_offsets = {params["offset"]}
+        origin = urlsplit(self.BASE)
+        expected_path = origin.path.rstrip("/") + "/posts/"
         for page in range(30):
+            offset = params["offset"]
             data = self.request("GET", "/posts/", params=params)
             results = data.get("results")
             if not isinstance(results, list):
                 raise ServiceError("Unexpected posts response")
-            self.feed_pages.append({"offset":params["offset"], "count":len(results), "has_next":bool(data.get("next"))})
+            next_url = data.get("next")
+            has_next = "next" not in data or next_url is not None
+            self.feed_pages.append({"offset": offset, "count": len(results), "has_next": has_next})
             posts.extend(results)
-            if not data.get("next") or not results:
+            if not has_next:
                 return posts
-            params["offset"] += len(results)
+            try:
+                if not isinstance(next_url, str) or not next_url:
+                    return posts
+                continuation = urlsplit(next_url)
+                if continuation.fragment or not continuation.query:
+                    return posts
+                if continuation.scheme or continuation.netloc:
+                    if (continuation.scheme.lower() != origin.scheme.lower()
+                            or continuation.netloc.lower() != origin.netloc.lower()
+                            or continuation.path != expected_path):
+                        return posts
+                elif continuation.path not in ("", expected_path):
+                    return posts
+                pairs = parse_qsl(continuation.query, keep_blank_values=True, strict_parsing=True)
+                offsets = [value for key, value in pairs if key == "offset"]
+                if len(offsets) != 1 or not offsets[0].isdecimal():
+                    return posts
+                expected_filters = []
+                for key, value in params.items():
+                    if key == "offset":
+                        continue
+                    values = value if isinstance(value, (list, tuple)) else (value,)
+                    expected_filters.extend((str(key), str(item)) for item in values)
+                actual_filters = [(key, value) for key, value in pairs if key != "offset"]
+                if sorted(actual_filters) != sorted(expected_filters):
+                    return posts
+                next_offset = int(offsets[0])
+            except (TypeError, ValueError):
+                return posts
+            if next_offset <= offset or next_offset in seen_offsets:
+                return posts
+            seen_offsets.add(next_offset)
+            params["offset"] = next_offset
         raise ServiceError("Feed exceeded the pagination safety limit")
 
     def post(self, post_id: int) -> dict:
