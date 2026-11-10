@@ -113,7 +113,7 @@ def test_negative_pagination_cannot_look_complete():
 
 def test_existing_page_requests_and_return_values_are_unchanged():
     remote = Metaculus.__new__(Metaculus)
-    pages = [{'results':[post()], 'next':'synthetic-next'}, {'results':[post(2)],'next':None}]
+    pages = [{'results':[post()], 'next':Metaculus.BASE + '/posts/?tournaments=33121&include_descriptions=true&with_cp=false&limit=100&order_by=scheduled_close_time&offset=1'}, {'results':[post(2)],'next':None}]
     calls = []
     def request(method,path,params):
         calls.append((method,path,params.copy()))
