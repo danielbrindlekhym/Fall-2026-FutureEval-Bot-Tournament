@@ -55,9 +55,15 @@ class FakeCallState:
 
     def __init__(self, initial_by_question=None):
         self.calls = []
+        self.stages = []
+        self.operation_stage = "operation_init"
         self.initial_by_question = dict(initial_by_question or {})
         self.released_guards = []
         self.finished = []
+
+    def set_operation_stage(self, stage):
+        self.stages.append(stage)
+        self.operation_stage = stage
 
     def meta(self, key, default=None):
         return default
@@ -91,12 +97,22 @@ def no_network_readiness(*args, **kwargs):
 
 
 class RateLimitApiTests(unittest.TestCase):
+    def assert_request_stage_matches_posts(self, state, session):
+        request_positions = [i for i, stage in enumerate(state.stages) if stage == "model_request"]
+        readiness_positions = [i for i, stage in enumerate(state.stages) if stage == "readiness"]
+        self.assertEqual(len(request_positions), len(session.posts))
+        previous_request = -1
+        for position in request_positions:
+            self.assertTrue(any(previous_request < ready < position for ready in readiness_positions))
+            previous_request = position
+
     def run_with(self, responses, callback):
         state = FakeCallState()
         session = FakeSession(responses)
         with patch.object(api.requests, "Session", return_value=session), patch.object(api, "check_readiness", no_network_readiness):
             model = configured_model(state, session)
             callback(model, state, session)
+            self.assert_request_stage_matches_posts(state, session)
         return model, state, session
 
     def test_first_model_429_keeps_other_configured_free_model_eligible(self):
@@ -254,6 +270,12 @@ class RateLimitLoopTests(unittest.TestCase):
             def __init__(self):
                 self.values = {"launch_time": "2026-10-01T00:00:00Z", "full_feed_reconciled": {"release_inventories": {}}}
                 self.updates = []
+                self.stages = []
+                self.operation_stage = "operation_init"
+
+            def set_operation_stage(self, stage):
+                self.stages.append(stage)
+                self.operation_stage = stage
 
             def meta(self, key, default=None):
                 return self.values.get(key, default)
@@ -342,6 +364,9 @@ class RateLimitLoopTests(unittest.TestCase):
         self.assertIs(model.config, config)
         self.assertTrue(result["rate_limit_circuit_open"])
         self.assertEqual(result["failures"][0]["diagnostics"]["request_failures"]["rate_limit_circuit_open"], 1)
+        self.assertEqual(state.stages[0], "inventory")
+        self.assertIn("forecast_validation", state.stages)
+        self.assertNotIn("research", state.stages)
 
     def test_fully_blocked_job_skips_research_and_all_state_changes(self):
         research_stub = ModuleType("futureeval_bot.research")
@@ -364,6 +389,12 @@ class RateLimitLoopTests(unittest.TestCase):
             def __init__(self):
                 self.values = {"launch_time": "2026-10-01T00:00:00Z", "full_feed_reconciled": {"release_inventories": {}}}
                 self.updates = []
+                self.stages = []
+                self.operation_stage = "operation_init"
+
+            def set_operation_stage(self, stage):
+                self.stages.append(stage)
+                self.operation_stage = stage
 
             def meta(self, key, default=None):
                 return self.values.get(key, default)
@@ -427,9 +458,20 @@ class RateLimitLoopTests(unittest.TestCase):
         self.assertEqual(frozen_job["phase"], "discovered")
         self.assertIsNone(frozen_job["payload"])
         self.assertIsNone(frozen_job["research"])
+        self.assertEqual(state.stages[0], "inventory")
+        self.assertNotIn("readiness", state.stages)
+        self.assertNotIn("research", state.stages)
 
     def test_preopened_circuit_yields_allowlisted_question_diagnostic_without_call(self):
         class State:
+            def __init__(self):
+                self.stages = []
+                self.operation_stage = "operation_init"
+
+            def set_operation_stage(self, stage):
+                self.stages.append(stage)
+                self.operation_stage = stage
+
             def job(self, question_id):
                 return {"payload": None}
 
@@ -445,9 +487,12 @@ class RateLimitLoopTests(unittest.TestCase):
         model = SimpleNamespace(rate_limit_circuit_open=lambda config=None: True)
         contract = Contract(101, 201, "binary", "synthetic", "", "", "",
             "2027-01-01T00:00:00Z", None, 33121)
+        state = State()
         with self.assertRaises(NoValidatedForecast) as caught:
-            prepare(State(), contract, Config(models=MODELS), model, {}, time.monotonic() + 60)
+            prepare(state, contract, Config(models=MODELS), model, {}, time.monotonic() + 60)
         self.assertEqual(caught.exception.diagnostics["request_failures"], {"rate_limit_circuit_open": 1})
+        self.assertEqual(state.call_count(101), 0)
+        self.assertEqual(state.stages, ["forecast_validation"])
 
 
 if __name__ == "__main__":

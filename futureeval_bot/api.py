@@ -283,7 +283,33 @@ def reconcile_and_submit(state: State, remote: Metaculus, question_id: int, *,
     def record_proof(forecast_ok, comment, forecasts):
         paired, status = _delivery_proof(contract, payload, forecasts, comment, marker, remote.user_id)
         save_proof(paired, status)
+        if state.active_operation_id:
+            try:
+                latest = max(forecasts, key=lambda forecast: forecast.get("start_time", 0)) if forecasts else None
+                forecast_match = bool(latest and matching_forecast(contract, payload, forecasts)
+                    and type(latest.get("author_id")) is int and latest.get("author_id") == remote.user_id)
+                author = comment.get("author") if isinstance(comment, dict) else None
+                comment_match = bool(comment and isinstance(author, dict)
+                    and type(author.get("id")) is int and author.get("id") == remote.user_id
+                    and type(comment.get("on_post")) is int and comment.get("on_post") == contract.post_id
+                    and comment.get("is_private") is True and isinstance(comment.get("text"), str)
+                    and comment["text"].startswith(marker))
+                forecast_time = _unix_time(latest.get("start_time")) if forecast_match else None
+                comment_time = _aware_iso_time(comment.get("created_at")) if comment_match else None
+                deadline = _aware_iso_time(contract.close_time)
+                deadline_text = deadline.isoformat().replace("+00:00", "Z") if deadline else None
+                f_status = "matched" if forecast_match else ("mismatched" if forecasts else "unknown")
+                c_status = "matched" if comment_match else ("mismatched" if comment else "unknown")
+                timing = status if paired else "unknown"
+                state.append_receipt_event(question_id, "forecast", f_status, timing,
+                    forecast_time.isoformat().replace("+00:00", "Z") if forecast_time else None, deadline_text)
+                state.append_receipt_event(question_id, "reasoning", c_status, timing,
+                    comment_time.isoformat().replace("+00:00", "Z") if comment_time else None, deadline_text)
+            except Exception:
+                # Optional event telemetry never changes the existing submission path.
+                pass
 
+    state.set_operation_stage("receipt_verification")
     forecast_ok, comment, forecasts = receipts()
     record_proof(forecast_ok, comment, forecasts)
     if forecasts and not forecast_ok:
@@ -295,12 +321,16 @@ def reconcile_and_submit(state: State, remote: Metaculus, question_id: int, *,
             return
         state.update(question_id, phase="submitting", error=None)
         if not forecast_ok and not comment:
+            state.set_operation_stage("forecast_submission")
             remote.submit_pair(contract, payload, job["explanation"])
         elif forecast_ok and not comment:
             # Also repairs a legacy partial submission without altering its probability.
+            state.set_operation_stage("reasoning_submission")
             remote.submit_comment(contract, job["explanation"])
         elif comment and not forecast_ok:
+            state.set_operation_stage("forecast_submission")
             remote.submit_forecast(contract, payload)
+        state.set_operation_stage("receipt_verification")
         forecast_ok, comment, forecasts = receipts()
         record_proof(forecast_ok, comment, forecasts)
         if forecasts and not forecast_ok:
@@ -382,6 +412,7 @@ class FreeModel:
                 "daily_free_requests": data.get("free_model_daily_requests"), "spending_ceiling_usd": 0}
 
     def complete(self, question_id: int, prompt: str, sample_index: int, timeout: float) -> dict:
+        self.state.set_operation_stage("readiness")
         if self.state.cost_receipt_halted or self.state.meta("cost_guard_halt"):
             raise ServiceError("Cost guard is halted pending an audit")
         if self.catalog is None:
@@ -448,6 +479,7 @@ class FreeModel:
         if "response_format" in parameters:
             body["response_format"] = {"type": "json_object"}
         try:
+            self.state.set_operation_stage("model_request")
             response = self.session.post(self.BASE + "/chat/completions", json=body,
                 timeout=min(timeout, self.config.model_timeout_seconds))
         except requests.RequestException:

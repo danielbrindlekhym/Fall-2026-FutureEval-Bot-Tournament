@@ -58,7 +58,8 @@ def test_pr15_category_allowlist_and_projection_remain_privacy_limited(tmp_path:
 
     assert set(summary) == {
         "summary_status", "operation_step_outcome", "stage_outcomes", "trigger_event",
-        "workflow_run_id", "workflow_run_attempt", "source_sha", "public_config_fingerprint_sha256",
+        "workflow_run_id", "workflow_run_attempt", "repository", "workflow_path", "requested_mode",
+        "source_sha", "public_config_fingerprint_sha256", "config_fingerprint",
         "operation_started_at", "operation_finished_at", "run_binding_status", "failure_count",
         "failure_type_counts", "validation_failure_categories", "request_failure_categories",
         "lifetime_phase_counts", "window_phase_counts", "lifetime_calls",
@@ -66,26 +67,28 @@ def test_pr15_category_allowlist_and_projection_remain_privacy_limited(tmp_path:
         "window_calls", "window_calls_with_recorded_cost", "window_calls_missing_cost",
         "window_recorded_cost_sum_usd", "window_aggregate_status", "cost_halt_status",
         "delivery_proof_status", "delivery_proof_observed_rows", "delivery_proof_scope",
-        "delivery_proof_counts",
+        "delivery_proof_counts", "run_attribution_status", "operation_outcome",
+        "operation_failure_stage_counts", "operation_failure_category_counts", "run_reservations",
+        "run_reservation_status", "run_completed_with_cost_receipt", "run_missing_cost_receipt",
+        "run_unknown_request_outcome", "run_recorded_cost_sum_usd", "run_cost_status",
+        "run_observed_questions", "run_receipt_counts",
     }
     assert summary["summary_status"] == "available"
     assert summary["operation_step_outcome"] == "failure"
     assert summary["trigger_event"] == "schedule"
     assert (summary["workflow_run_id"], summary["workflow_run_attempt"]) == ("12345", "1")
     assert summary["source_sha"] == "a" * 40
-    assert summary["run_binding_status"] == "matched"
-    assert summary["failure_count"] == 1
-    assert summary["validation_failure_categories"] == {"validation_rejected": 1}
-    assert summary["request_failure_categories"] == {
-        "http_rate_limited": 2, "other": 5,
-        "rate_limit_circuit_open": 3, "readiness_stopped": 4,
-    }
+    # Timestamp-only legacy state is never relabeled as this workflow attempt.
+    assert summary["run_binding_status"] == "unknown"
+    assert summary["failure_count"] is None
+    assert summary["validation_failure_categories"] == {}
+    assert summary["request_failure_categories"] == {}
     assert unknown_private_category not in json.dumps(summary, sort_keys=True)
     assert summary["lifetime_phase_counts"] == {"discovered": 1, "submitted": 1}
     assert (summary["lifetime_calls"], summary["lifetime_calls_with_recorded_cost"],
             summary["lifetime_calls_missing_cost"], summary["lifetime_recorded_cost_sum_usd"]) == (2, 1, 1, 0.0)
-    assert (summary["window_calls"], summary["window_calls_with_recorded_cost"],
-            summary["window_calls_missing_cost"], summary["window_recorded_cost_sum_usd"]) == (2, 1, 1, 0.0)
+    assert summary["window_calls"] is None
+    assert summary["window_recorded_cost_sum_usd"] is None
     assert summary["cost_halt_status"] == "clear"
 
     mismatched = collect_summary(db_path, config_path=config_path, env={

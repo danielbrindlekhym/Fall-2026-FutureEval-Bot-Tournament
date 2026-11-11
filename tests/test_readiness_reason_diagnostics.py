@@ -145,6 +145,11 @@ class FakeState:
         self.reservations = 0
         self.finished = 0
         self.cost_receipt_halted = False
+        self.stages = []
+        self.operation_stage = "operation_init"
+    def set_operation_stage(self, stage):
+        self.stages.append(stage)
+        self.operation_stage = stage
     def meta(self, key):
         return None
     def call_count(self, question_id):
@@ -213,7 +218,7 @@ def exercise_api(package, all_reject=False, timeout=30, prior=False):
     finally:
         module.requests.Session = previous_session
     return {"trace": list(FakeSession.trace), "reservations": state.reservations,
-            "finished": state.finished, "error": error}
+            "finished": state.finished, "error": error, "stages": state.stages}
 
 
 class APIAndAggregateTests(unittest.TestCase):
@@ -238,6 +243,8 @@ class APIAndAggregateTests(unittest.TestCase):
         self.assertEqual(after["trace"], before["trace"])
         self.assertEqual((before["reservations"], before["finished"]), (1, 1))
         self.assertEqual((after["reservations"], after["finished"]), (1, 1))
+        self.assertEqual(after["stages"].count("model_request"), 1)
+        self.assertLess(after["stages"].index("readiness"), after["stages"].index("model_request"))
         metadata_sessions = [s for s in FakeSession.instances if not s.is_main]
         self.assertTrue(all(s.closed and s.trust_env is False and s.auth is None for s in metadata_sessions))
 
@@ -260,10 +267,18 @@ class APIAndAggregateTests(unittest.TestCase):
             self.assertIsNotNone(new["error"])
             self.assertNotIn(PRIVATE, str(new["error"].diagnostics))
             self.assertEqual(new["error"].diagnostics["selector_stop"], kind)
+            self.assertIn("readiness", new["stages"])
+            self.assertNotIn("model_request", new["stages"])
 
     def test_existing_no_validated_forecast_aggregate_contains_only_fixed_codes(self):
         module = self.candidate["forecast"]
         class State:
+            def __init__(self):
+                self.stages = []
+                self.operation_stage = "operation_init"
+            def set_operation_stage(self, stage):
+                self.stages.append(stage)
+                self.operation_stage = stage
             def job(self, question_id): return {"payload": None}
             def completed_calls(self, question_id): return []
             def call_count(self, question_id): return 0
@@ -291,6 +306,7 @@ class APIAndAggregateTests(unittest.TestCase):
         self.assertNotIn(PRIVATE, str(diag))
         self.assertNotIn(PRIVATE, str(caught.exception))
         self.assertEqual(state.call_count(42), 0)
+        self.assertEqual(state.stages[-1], "forecast_validation")
 
 
 class PinTests(unittest.TestCase):

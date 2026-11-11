@@ -45,12 +45,36 @@ def live_gate(config: Config, state: State):
         raise ServiceError("; ".join(problems))
 
 
+def _fixed_failure_category(error, stage: str) -> str:
+    name = type(error).__name__.lower()
+    if "timeout" in name:
+        return "timeout"
+    if "connection" in name or "requestexception" in name:
+        return "transport_unconfirmed"
+    if stage == "model_cost_receipt":
+        return "payment_or_cost"
+    if stage == "checkpoint_restore":
+        return "checkpoint_stale"
+    if stage == "inventory":
+        return "inventory_incomplete"
+    if stage == "forecast_validation":
+        return "validation"
+    if stage in {"forecast_submission", "reasoning_submission", "receipt_verification"}:
+        return "receipt_missing"
+    if stage == "readiness" and "serviceerror" in name:
+        return "provider_error"
+    if name in {"valueerror", "typeerror", "keyerror", "indexerror"}:
+        return "invalid_response"
+    return "internal"
+
+
 def run(config: Config, state: State, remote, model, *, practice=False, max_questions=None,
         workflow_run_id=None, workflow_run_attempt=None, operation_started_at=None) -> dict:
     project = config.practice_project if practice else config.season_project
     if not practice:
         live_gate(config, state)
     # Reconcile the whole feed, including closed questions missed during downtime.
+    state.set_operation_stage("inventory")
     posts = remote.posts(project)
     feed_checked_at = utcnow().isoformat()
     contracts, skipped = {}, 0
@@ -126,11 +150,13 @@ def run(config: Config, state: State, remote, model, *, practice=False, max_ques
             if job["research"]:
                 evidence = json.loads(job["research"])
             else:
+                state.set_operation_stage("research")
                 clarifications = remote.comments(contract.post_id, staff=True)
                 contract = replace(contract, staff_clarifications=[c.get("text", "") for c in clarifications])
                 evidence = research(contract, job_config, min(stop_at - 30, time.monotonic() + 75))
                 evidence["staff_clarifications"] = contract.staff_clarifications
                 state.update(contract.question_id, research=canonical(evidence), phase="researched")
+            state.set_operation_stage("forecast_validation")
             prepare(state, contract, job_config, model, evidence, stop_at)
             model.config = previous_config
             reconcile_and_submit(state, remote, contract.question_id,
@@ -141,7 +167,9 @@ def run(config: Config, state: State, remote, model, *, practice=False, max_ques
                 model.config = previous_config
             # No raw model answer or source text goes to workflow logs.
             state.update(contract.question_id, error=type(error).__name__ + ": " + str(error)[:220])
-            failure = {"question_id": contract.question_id, "error_type": type(error).__name__}
+            failure = {"question_id": contract.question_id, "error_type": type(error).__name__,
+                "stage": state.operation_stage,
+                "failure_category": _fixed_failure_category(error, state.operation_stage)}
             if isinstance(error, NoValidatedForecast):
                 failure["diagnostics"] = error.diagnostics
             failures.append(failure)
@@ -166,6 +194,7 @@ def run(config: Config, state: State, remote, model, *, practice=False, max_ques
         # Durable writes remain outside the optional-validation exception handler.
         state.set_meta('full_feed_reconciled', {'at': utcnow().isoformat(), 'project': project,
             'posts': len(posts), 'release_inventories': inventories})
+    state.set_operation_stage("summary_publication")
     state.set_meta("last_run", {"at": utcnow().isoformat(), "project": project, "config": config.fingerprint,
         "failures": failures, "questions_considered": attempted, "unsupported_posts": skipped,
         "workflow_run_id": workflow_run_id, "workflow_run_attempt": workflow_run_attempt,
@@ -174,6 +203,7 @@ def run(config: Config, state: State, remote, model, *, practice=False, max_ques
     result["release_inventory_counts"] = export_counts
     result["rate_limit_circuit_open"] = bool(getattr(model, "rate_limit_circuit_opened", False))
     result["failures"] = failures
+    result["operation_questions_observed"] = len(contracts)
     result["practice_verified_formats"] = state.meta("practice_verified_formats", [])
     return result
 
@@ -206,19 +236,41 @@ def main():
                 print(canonical({"registration_confirmed": config.registration_confirmed, "live_enabled": config.live_enabled,
                     "practice_verified_formats": state.meta("practice_verified_formats", [])}))
             else:
-                if args.mode == "live":
-                    live_gate(config, state)
-                remote, model = services(config, state)
                 workflow_run_id = os.getenv("BOT_WORKFLOW_RUN_ID", "")
                 workflow_run_attempt = os.getenv("BOT_WORKFLOW_RUN_ATTEMPT", "")
                 operation_started_at = os.getenv("BOT_OPERATION_STARTED_AT", "")
-                result = run(config, state, remote, model, practice=args.mode == "practice", max_questions=args.max_questions,
-                    workflow_run_id=workflow_run_id if workflow_run_id.isdigit() else None,
-                    workflow_run_attempt=workflow_run_attempt if workflow_run_attempt.isdigit() else None,
-                    operation_started_at=operation_started_at or None)
-                print(canonical(result))
-                if result["failures"]:
-                    return 1
+                envelope = {"repository": os.getenv("BOT_REPOSITORY", ""),
+                    "workflow_path": os.getenv("BOT_WORKFLOW_PATH", ""),
+                    "workflow_run_id": workflow_run_id, "workflow_run_attempt": workflow_run_attempt,
+                    "source_sha": os.getenv("BOT_SOURCE_SHA", ""),
+                    "config_fingerprint": config.fingerprint,
+                    "trigger_event": os.getenv("BOT_TRIGGER_EVENT", ""),
+                    "requested_mode": args.mode, "started_at": operation_started_at}
+                state.start_operation(envelope)
+                try:
+                    if args.mode == "live":
+                        state.set_operation_stage("readiness")
+                        live_gate(config, state)
+                    state.set_operation_stage("readiness")
+                    remote, model = services(config, state)
+                    result = run(config, state, remote, model, practice=args.mode == "practice", max_questions=args.max_questions,
+                        workflow_run_id=workflow_run_id if workflow_run_id.isdigit() else None,
+                        workflow_run_attempt=workflow_run_attempt if workflow_run_attempt.isdigit() else None,
+                        operation_started_at=operation_started_at or None)
+                    status = "completed_with_failures" if result["failures"] else "completed"
+                    first = result["failures"][0] if result["failures"] else {}
+                    state.finish_operation(status, failure_stage=first.get("stage"),
+                        failure_category=first.get("failure_category"),
+                        observed_questions=result.get("operation_questions_observed"),
+                        failures=result["failures"])
+                    print(canonical(result))
+                    if result["failures"]:
+                        return 1
+                except Exception as error:
+                    if state.active_operation_id:
+                        state.finish_operation("failed", failure_stage=state.operation_stage,
+                            failure_category=_fixed_failure_category(error, state.operation_stage))
+                    raise
         finally:
             state.close()
     return 0
