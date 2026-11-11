@@ -134,17 +134,20 @@ def _run_cli(tmp_path, *, last_run="matched", halt="false", failed_stage=None,
 def test_real_cli_is_sanitized_and_separates_lifetime_from_run_window(tmp_path):
     result, completed, summary, env = _run_cli(tmp_path)
     assert all(env[name] == "" for name in SECRET_SENTINELS)
-    assert result["run_binding_status"] == "matched"
-    assert result["failure_count"] == 1
-    assert result["failure_type_counts"] == {"NoValidatedForecast": 1}
-    assert result["validation_failure_categories"] == {"invalid_json": 2, "other": 5}
-    assert result["request_failure_categories"] == {"transport_unconfirmed": 1}
-    assert result["lifetime_calls"] == 3 and result["window_calls"] == 2
-    assert result["lifetime_calls_missing_cost"] == 1 and result["window_calls_missing_cost"] == 1
+    # A timestamp-correlated legacy last_run record cannot bind lifetime rows
+    # to this workflow attempt. Keep lifetime totals labelled and run fields unknown.
+    assert result["run_binding_status"] == "unknown"
+    assert result["failure_count"] is None
+    assert result["failure_type_counts"] == {}
+    assert result["validation_failure_categories"] == {}
+    assert result["request_failure_categories"] == {}
+    assert result["lifetime_calls"] == 3 and result["window_calls"] is None
+    assert result["lifetime_calls_missing_cost"] == 1 and result["window_calls_missing_cost"] is None
     assert result["lifetime_recorded_cost_sum_usd"] == 0.25
-    assert result["window_recorded_cost_sum_usd"] == 0.0
+    assert result["window_recorded_cost_sum_usd"] is None
     assert result["lifetime_phase_counts"] == {"missed": 1, "verified": 1}
-    assert result["window_phase_counts"] == {"missed": 1}
+    assert result["window_phase_counts"] is None
+    assert result["window_aggregate_status"] == "unknown"
     assert result["cost_halt_status"] == "clear"
     assert result["source_sha"] == "1c9fc16ef8c4752472e712a9d3f3c1707e779da7"
     assert len(result["public_config_fingerprint_sha256"]) == 64
@@ -172,8 +175,9 @@ def test_early_or_unbound_records_never_become_success_or_zero_calls(tmp_path, c
     assert result["run_binding_status"] == "unknown"
     assert result["failure_count"] is None
     assert result["failure_type_counts"] == {}
-    assert result["window_calls"] == 2
-    assert result["window_aggregate_status"] == "available"
+    assert result["lifetime_calls"] == 3
+    assert result["window_calls"] is None
+    assert result["window_aggregate_status"] == "unknown"
 
 
 @pytest.mark.parametrize("stage", list(STAGES))
@@ -249,7 +253,7 @@ def test_producer_has_only_allowlisted_imports_and_read_only_sqlite_access():
     # variable `requests`, while rejecting network, dotenv, bot-state and
     # dynamic-import escape routes.
     allowed_imports = {
-        "__future__", "hashlib", "json", "os", "re", "sqlite3", "contextlib",
+        "__future__", "hashlib", "json", "math", "os", "re", "sqlite3", "contextlib",
         "collections", "datetime", "pathlib",
     }
     imported = set()

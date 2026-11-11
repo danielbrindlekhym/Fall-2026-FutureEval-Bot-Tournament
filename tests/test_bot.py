@@ -235,6 +235,28 @@ def test_free_call_limits_count_uncertain_calls(state):
         state.reserve_call(2, config.models[0], config)
 
 
+def test_unattributed_legacy_calls_still_count_against_question_and_daily_caps(state):
+    config = Config()
+    day = utcnow().date().isoformat()
+    with state.db:
+        state.db.executemany("INSERT INTO calls(question_id,day,model,status,created) VALUES(?,?,?,?,?)",
+            [(77, day, config.models[0], "started", utcnow().isoformat()) for _ in range(2)])
+    call = state.reserve_call(77, config.models[0], config)
+    assert state.call_count(77) == 3
+    assert state.db.execute("SELECT COUNT(*) FROM call_attribution").fetchone()[0] == 0
+    with pytest.raises(RuntimeError):
+        state.reserve_call(77, config.models[0], config)
+
+    with state.db:
+        state.db.executemany("INSERT INTO calls(question_id,day,model,status,created) VALUES(?,?,?,?,?)",
+            [(1000 + i, day, config.models[0], "started", utcnow().isoformat()) for i in range(36)])
+    # 39 prior reservations plus the new one above reach the existing daily cap.
+    assert state.db.execute("SELECT COUNT(*) FROM calls WHERE day=?", (day,)).fetchone()[0] == 39
+    state.reserve_call(78, config.models[0], config)
+    with pytest.raises(RuntimeError):
+        state.reserve_call(79, config.models[0], config)
+
+
 @pytest.mark.parametrize("values", [{"spending_ceiling_usd": 1}, {"models": ["paid/model"]}, {"models": ["paid/model:online"]}])
 def test_paid_configuration_rejected(values):
     with pytest.raises(ValueError):

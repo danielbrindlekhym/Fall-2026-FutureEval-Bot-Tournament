@@ -71,8 +71,14 @@ def unseal(encrypted: bytes, token: str) -> bytes:
 
 
 def signature(db: sqlite3.Connection) -> str:
-    material = {table: [tuple(row) for row in db.execute('SELECT * FROM ' + table + ' ORDER BY 1')]
-                for table in ('jobs', 'calls')}
+    # These additive attribution tables were introduced after the first public
+    # checkpoint. Treat a missing legacy table exactly like an empty new table;
+    # once populated, its rows participate in every subsequent checkpoint CAS.
+    material = {}
+    for table in ('jobs', 'calls', 'call_attribution', 'operations', 'receipt_events', 'delivery_proof'):
+        exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+        material[table] = ([tuple(row) for row in db.execute('SELECT * FROM ' + table + ' ORDER BY 1')]
+                           if exists else [])
     material['meta'] = [tuple(row) for row in db.execute('SELECT * FROM meta ORDER BY key') if row[0] not in VOLATILE]
     return hashlib.sha256(canonical(material).encode()).hexdigest()
 

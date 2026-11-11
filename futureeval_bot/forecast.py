@@ -280,6 +280,7 @@ def prepare(state: State, contract: Contract, config: Config, model, evidence: d
         if len(errors) >= config.max_calls_per_question + 1:
             break
     if not valid:
+        state.set_operation_stage("forecast_validation")
         raise NoValidatedForecast({"validation_failures": validation_failures,
             "request_failures": request_failures, "reserved_calls": state.call_count(contract.question_id),
             "cost_guard_halted": bool(state.meta("cost_guard_halt")),

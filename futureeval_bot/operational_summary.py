@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
@@ -26,6 +27,12 @@ _CATEGORIES = {
 }
 _OUTCOMES = {"success", "failure", "cancelled", "skipped", "unknown"}
 _EVENTS = {"schedule", "workflow_dispatch", "unknown"}
+_OP_STAGES = {"operation_init", "checkpoint_restore", "readiness", "inventory", "research",
+    "model_reservation", "model_request", "model_cost_receipt", "forecast_validation", "payload_freeze",
+    "forecast_submission", "reasoning_submission", "receipt_verification", "summary_publication", "cleanup", "unknown"}
+_OP_CATEGORIES = {"timeout", "transport_unconfirmed", "authentication", "rate_limited", "payment_or_cost",
+    "provider_error", "invalid_response", "validation", "deadline", "frozen_payload_conflict",
+    "receipt_missing", "checkpoint_stale", "inventory_incomplete", "internal", "other", "unknown"}
 _STAGES = {
     "checkout": "BOT_STEP_CHECKOUT_OUTCOME",
     "setup_python": "BOT_STEP_SETUP_PYTHON_OUTCOME",
@@ -115,11 +122,27 @@ def _context(env: dict[str, str], config_path: str | Path) -> dict:
     source = env.get("BOT_SOURCE_SHA", "").lower()
     source = source if re.fullmatch(r"[0-9a-f]{40}", source) else None
     fingerprint = None
+    public_config_fingerprint = None
     try:
-        public_config = json.loads(Path(config_path).read_text(encoding="utf-8"))
+        public_config = json.loads(Path(config_path).read_text(encoding="utf-8-sig"))
         if isinstance(public_config, dict):
             canonical = json.dumps(public_config, sort_keys=True, separators=(",", ":"), allow_nan=False)
             fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+            normalized = {
+                "version": "free-baseline-0.1", "spending_ceiling_usd": 0,
+                "registration_confirmed": False, "live_enabled": False,
+                "expected_bot_user_id": 310267, "season_project": 33121,
+                "practice_project": 32977,
+                "models": ["nvidia/nemotron-3-super-120b-a12b:free", "google/gemma-4-31b-it:free"],
+                "samples_per_question": 2, "max_calls_per_question": 3,
+                "max_calls_per_day": 40, "max_output_tokens": 4096,
+                "model_timeout_seconds": 150, "question_budget_seconds": 480,
+                "deadline_reserve_seconds": 300, "max_questions_per_run": 10,
+                "search_results_per_query": 4, "max_pages_to_fetch": 3, "state_dir": "state",
+            }
+            normalized.update(public_config)
+            fingerprint_payload = json.dumps(normalized, sort_keys=True, ensure_ascii=False, allow_nan=False)
+            public_config_fingerprint = hashlib.sha256(fingerprint_payload.encode()).hexdigest()[:16]
     except (OSError, ValueError, TypeError):
         pass
     stage_outcomes = {stage: _outcome(env.get(variable, "unknown")) for stage, variable in _STAGES.items()}
@@ -132,8 +155,12 @@ def _context(env: dict[str, str], config_path: str | Path) -> dict:
         "trigger_event": event,
         "workflow_run_id": run_id,
         "workflow_run_attempt": attempt,
+        "repository": env.get("BOT_REPOSITORY") or None,
+        "workflow_path": env.get("BOT_WORKFLOW_PATH") or None,
+        "requested_mode": env.get("BOT_OPERATION_MODE") or env.get("REQUESTED_MODE") or None,
         "source_sha": source,
         "public_config_fingerprint_sha256": fingerprint,
+        "config_fingerprint": public_config_fingerprint,
         "operation_started_at": _iso(start),
         "operation_finished_at": _iso(finish) if start else None,
         "run_binding_status": "unknown",
@@ -157,6 +184,19 @@ def _context(env: dict[str, str], config_path: str | Path) -> dict:
         "delivery_proof_observed_rows": None,
         "delivery_proof_scope": None,
         "delivery_proof_counts": None,
+        "run_attribution_status": "unknown",
+        "operation_outcome": "unknown",
+        "operation_failure_stage_counts": {},
+        "operation_failure_category_counts": {},
+        "run_reservations": None,
+        "run_reservation_status": "unknown",
+        "run_completed_with_cost_receipt": None,
+        "run_missing_cost_receipt": None,
+        "run_unknown_request_outcome": None,
+        "run_recorded_cost_sum_usd": None,
+        "run_cost_status": "unknown",
+        "run_observed_questions": None,
+        "run_receipt_counts": None,
     }
     return base, start, finish, run_id, attempt
 
@@ -173,6 +213,7 @@ def collect_summary(database: str | Path, *, config_path: str | Path = "config.j
     try:
         uri = db_path.resolve().as_uri() + "?mode=ro"
         with closing(sqlite3.connect(uri, uri=True, timeout=2)) as db:
+            db.row_factory = sqlite3.Row
             db.execute("PRAGMA query_only=ON")
             lifetime_phases = Counter()
             for (phase,) in db.execute("SELECT phase FROM jobs"):
@@ -183,86 +224,146 @@ def collect_summary(database: str | Path, *, config_path: str | Path = "config.j
             ).fetchone()
             raw_meta = dict(db.execute("SELECT key,value FROM meta WHERE key IN (?,?)",
                                        ("last_run", "cost_guard_halt")).fetchall())
-            proof_table = db.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", ("delivery_proof",)
-            ).fetchone()
-            if proof_table and run_id and attempt:
-                delivery_rows = db.execute(
-                    "SELECT paired,status FROM delivery_proof "
-                    "WHERE workflow_run_id=? AND workflow_run_attempt=?", (run_id, attempt)
-                ).fetchall()
-            else:
-                delivery_rows = None
-            if start:
-                window_calls = db.execute(
-                    "SELECT COUNT(*), COUNT(cost), COALESCE(SUM(CASE WHEN cost IS NULL THEN 1 ELSE 0 END),0), "
-                    "COALESCE(SUM(cost),0) FROM calls "
-                    "WHERE julianday(created)>=julianday(?) AND julianday(created)<=julianday(?)",
-                    (_iso(start), _iso(finish)),
+            table_names = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            repository = env.get("BOT_REPOSITORY", "")
+            workflow_path = env.get("BOT_WORKFLOW_PATH", "")
+            source = result.get("source_sha")
+            config_fingerprint = result.get("config_fingerprint")
+            event = result.get("trigger_event")
+            mode = result.get("requested_mode")
+            exact_context = bool(run_id and attempt and start and source and repository.count("/") == 1
+                and workflow_path == ".github/workflows/forecast.yml" and event in {"schedule", "workflow_dispatch"}
+                and mode in {"live", "practice"} and config_fingerprint)
+            op_id = "/".join((repository, run_id, attempt)) if exact_context else None
+            op = None
+            call_rows = None
+            receipt_rows = None
+            if op_id and {"operations", "call_attribution", "receipt_events"} <= table_names:
+                op = db.execute(
+                    "SELECT operation_id,repository,workflow_path,workflow_run_id,workflow_run_attempt,"
+                    "source_sha,config_fingerprint,trigger_event,requested_mode,started_at,finished_at,"
+                    "status,failure_stage,failure_category,failure_stage_counts,failure_category_counts,"
+                    "checkpoint_continuity,observed_questions FROM operations WHERE operation_id=?", (op_id,)
                 ).fetchone()
-                window_phases = Counter()
-                for (phase,) in db.execute(
-                    "SELECT phase FROM jobs WHERE julianday(updated)>=julianday(?) AND julianday(updated)<=julianday(?)",
-                    (_iso(start), _iso(finish)),
-                ):
-                    window_phases[phase if phase in _PHASES else "other"] += 1
-            else:
-                window_calls, window_phases = None, None
+                if op is not None:
+                    call_rows = db.execute(
+                        "SELECT c.id,c.status,c.cost,a.workflow_run_id,a.workflow_run_attempt,a.source_sha,"
+                        "a.outcome_status,a.cost_receipt_status,a.cost_received_at "
+                        "FROM call_attribution a JOIN calls c ON c.id=a.call_id "
+                        "WHERE a.operation_id=? ORDER BY c.id", (op_id,)).fetchall()
+                    receipt_rows = db.execute(
+                        "SELECT question_id,receipt_type,match_status,timing_status,server_at,deadline_at,id "
+                        "FROM receipt_events WHERE operation_id=? ORDER BY id", (op_id,)).fetchall()
     except (OSError, sqlite3.Error, ValueError):
         result.update(summary_status="unavailable", unavailable_reason="database_read_failed")
         return result
 
-    binding, last_run = _correlated_last_run(raw_meta.get("last_run"), run_id=run_id, attempt=attempt,
-                                              start=start, finish=finish)
-    result["run_binding_status"] = binding
-    if binding == "matched":
-        failures = last_run["failures"]
-        types: Counter[str] = Counter()
-        validation: Counter[str] = Counter()
-        requests: Counter[str] = Counter()
-        for failure in failures:
-            if not isinstance(failure, dict):
-                continue
-            error_type = failure.get("error_type")
-            types[error_type if isinstance(error_type, str) and error_type in _ERROR_TYPES else "other"] += 1
-            diagnostics = failure.get("diagnostics")
-            if isinstance(diagnostics, dict):
-                validation.update(_counts(diagnostics.get("validation_failures"), _CATEGORIES))
-                requests.update(_counts(diagnostics.get("request_failures"), _CATEGORIES))
-        result["failure_count"] = sum(types.values())
-        result["failure_type_counts"] = dict(sorted(types.items()))
-        result["validation_failure_categories"] = dict(sorted(validation.items()))
-        result["request_failure_categories"] = dict(sorted(requests.items()))
-        if delivery_rows is not None:
-            proof_counts = Counter()
-            paired_count = 0
-            for paired, status in delivery_rows:
-                if paired == 1:
-                    paired_count += 1
-                proof_counts[status if status in {"on_time", "late", "unknown"} else "unknown"] += 1
-            result["delivery_proof_status"] = "available"
-            result["delivery_proof_observed_rows"] = len(delivery_rows)
-            result["delivery_proof_scope"] = "run_observed_subset_not_released_question_or_seasonal_denominator"
-            result["delivery_proof_counts"] = {
-                "paired": paired_count,
-                "on_time": proof_counts["on_time"],
-                "late": proof_counts["late"],
-                "unknown": proof_counts["unknown"],
-            }
+    result["run_binding_status"] = "unknown"
+    if op is not None:
+        fields = {"repository": repository, "workflow_path": workflow_path, "workflow_run_id": run_id,
+                  "workflow_run_attempt": attempt, "source_sha": source,
+                  "config_fingerprint": config_fingerprint, "trigger_event": event,
+                  "requested_mode": mode}
+        matches = all(op[key] == value for key, value in fields.items())
+        matches = matches and _time(op["started_at"]) == start and op["checkpoint_continuity"] == "verified"
+        if matches and op["status"] in {"completed", "completed_with_failures", "failed"}:
+            row_mismatch = any(row[3] != run_id or row[4] != attempt or row[5] != source for row in call_rows)
+            if not row_mismatch:
+                result["run_binding_status"] = "bound_complete"
+                result["run_attribution_status"] = "complete"
+                result["operation_outcome"] = op["status"]
+                result["run_observed_questions"] = op["observed_questions"]
+                def safe_counter(raw, allowed):
+                    try:
+                        parsed = json.loads(raw) if isinstance(raw, str) else {}
+                    except (TypeError, json.JSONDecodeError):
+                        return {}
+                    return {k: v for k, v in parsed.items() if k in allowed and type(v) is int and v > 0}
+                stage_counts = safe_counter(op["failure_stage_counts"], _OP_STAGES)
+                category_counts = safe_counter(op["failure_category_counts"], _OP_CATEGORIES)
+                result["operation_failure_stage_counts"] = dict(sorted(stage_counts.items()))
+                result["operation_failure_category_counts"] = dict(sorted(category_counts.items()))
+                result["failure_count"] = sum(category_counts.values())
+                result["failure_type_counts"] = {}
+                result["validation_failure_categories"] = {}
+                result["request_failure_categories"] = dict(sorted(category_counts.items()))
+                result["run_reservations"] = len(call_rows)
+                result["run_reservation_status"] = (
+                    "no_instrumented_model_reservations" if not call_rows
+                    else "complete_bound_ledger"
+                )
+                completed, missing, unknown, cost_sum = 0, 0, 0, 0.0
+                for row in call_rows:
+                    finite_cost = type(row[2]) in (int, float) and math.isfinite(row[2])
+                    if row[7] == "confirmed" and finite_cost and _time(row[8]):
+                        completed += 1
+                        cost_sum += float(row[2])
+                    else:
+                        missing += 1
+                    if row[1] != "done" or row[6] != "completed":
+                        unknown += 1
+                result["run_completed_with_cost_receipt"] = completed
+                result["run_missing_cost_receipt"] = missing
+                result["run_unknown_request_outcome"] = unknown
+                result["run_recorded_cost_sum_usd"] = cost_sum
+                halt = _halt_status(raw_meta.get("cost_guard_halt"), "cost_guard_halt" in raw_meta)
+                result["cost_halt_status"] = halt
+                result["run_cost_status"] = ("unknown" if halt != "clear" or missing or unknown else
+                    ("confirmed_zero" if cost_sum == 0 else "confirmed_nonzero"))
+                result["window_calls"] = len(call_rows)
+                result["window_calls_with_recorded_cost"] = completed
+                result["window_calls_missing_cost"] = missing
+                result["window_recorded_cost_sum_usd"] = cost_sum
+                result["window_aggregate_status"] = "run_bound_complete"
+
+                latest = {}
+                for row in receipt_rows:
+                    latest[(row[0], row[1])] = row
+                per_question = {}
+                for (question_id, receipt_type), row in latest.items():
+                    per_question.setdefault(question_id, {})[receipt_type] = row
+                forecasts = sum("forecast" in items and items["forecast"][2] == "matched"
+                                 for items in per_question.values())
+                reasoning = sum("reasoning" in items and items["reasoning"][2] == "matched"
+                                for items in per_question.values())
+                pairs = on_time = late = incomplete = 0
+                for items in per_question.values():
+                    f, c = items.get("forecast"), items.get("reasoning")
+                    if not (f and c and f[2] == c[2] == "matched"):
+                        incomplete += 1
+                        continue
+                    pairs += 1
+                    times = (_time(f[4]), _time(c[4]))
+                    deadlines = (_time(f[5]), _time(c[5]))
+                    if "late" in {f[3], c[3]} or (all(times) and all(deadlines)
+                        and any(t > d for t, d in zip(times, deadlines))):
+                        late += 1
+                    elif f[3] == c[3] == "on_time" and all(times) and all(deadlines):
+                        on_time += 1
+                    else:
+                        incomplete += 1
+                receipt_counts = {"forecast_receipts": forecasts, "reasoning_receipts": reasoning,
+                    "verified_pairs": pairs, "on_time_proven_pairs": on_time, "late_pairs": late,
+                    "unknown_or_incomplete_pairs": incomplete,
+                    "scope": "questions_observed_by_this_operation_only_not_official_release_denominator"}
+                result["run_receipt_counts"] = receipt_counts
+                result["delivery_proof_status"] = "available"
+                result["delivery_proof_observed_rows"] = len(receipt_rows)
+                result["delivery_proof_scope"] = receipt_counts["scope"]
+                result["delivery_proof_counts"] = {"paired": pairs, "on_time": on_time,
+                    "late": late, "unknown": incomplete}
+        elif matches:
+            result["run_binding_status"] = "incomplete"
+            result["run_attribution_status"] = "incomplete"
+            result["operation_outcome"] = "incomplete"
 
     result["lifetime_phase_counts"] = dict(sorted(lifetime_phases.items()))
     result["lifetime_calls"] = int(lifetime_calls[0])
     result["lifetime_calls_with_recorded_cost"] = int(lifetime_calls[1])
     result["lifetime_calls_missing_cost"] = int(lifetime_calls[2])
     result["lifetime_recorded_cost_sum_usd"] = float(lifetime_calls[3] or 0)
-    if start and window_calls is not None:
-        result["window_phase_counts"] = dict(sorted(window_phases.items()))
-        result["window_calls"] = int(window_calls[0])
-        result["window_calls_with_recorded_cost"] = int(window_calls[1])
-        result["window_calls_missing_cost"] = int(window_calls[2])
-        result["window_recorded_cost_sum_usd"] = float(window_calls[3] or 0)
-        result["window_aggregate_status"] = "available"
-    result["cost_halt_status"] = _halt_status(raw_meta.get("cost_guard_halt"), "cost_guard_halt" in raw_meta)
+    if result["cost_halt_status"] == "unknown":
+        result["cost_halt_status"] = _halt_status(raw_meta.get("cost_guard_halt"), "cost_guard_halt" in raw_meta)
     return result
 
 
