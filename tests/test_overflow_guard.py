@@ -22,8 +22,13 @@ class MemoryState:
     def __init__(self, responses):
         self.calls = []
         self.saved = None
+        self.stages = []
+        self.operation_stage = "operation_init"
         for item in responses:
             self.add(item)
+    def set_operation_stage(self, stage):
+        self.stages.append(stage)
+        self.operation_stage = stage
     def add(self, item):
         self.calls.append({'id': len(self.calls), 'cost': 0, 'response': json.dumps(item), 'model': 'invented-fixture'})
     def completed_calls(self, qid):
@@ -62,7 +67,7 @@ def run(env, kind, inputs, permit_fake_calls=False):
         result.update(status=type(error).__name__)
         if isinstance(error, env['NoValidatedForecast']):
             result['diagnostics'] = error.diagnostics
-    result.update(reserved=len(state.calls), fake_model_calls=model.calls)
+    result.update(reserved=len(state.calls), fake_model_calls=model.calls, stages=state.stages)
     return result
 
 @pytest.fixture
@@ -90,6 +95,7 @@ def test_all_invalid_remain_rejected(env, kind):
     assert actual['status'] == 'NoValidatedForecast'
     assert actual['reserved'] == 3 and actual['fake_model_calls'] == 0
     assert sum(actual['diagnostics']['validation_failures'].values()) == 3
+    assert actual['stages'][-1] == 'forecast_validation'
 
 @pytest.mark.parametrize('kind', ['binary', 'multiple_choice', 'numeric', 'discrete'])
 def test_only_remaining_attempts_used(env, kind):
@@ -132,6 +138,7 @@ def test_all_invalid_containers_fail_closed(env, shape):
     assert actual['status'] == 'NoValidatedForecast'
     assert actual['diagnostics']['validation_failures'] == {'invalid_structure': 3}
     assert actual['reserved'] == 3 and actual['fake_model_calls'] == 0
+    assert actual['stages'][-1] == 'forecast_validation'
 
 
 @pytest.mark.parametrize('probabilities', [{'A': 0.4, 'B': 0.6}, {'A': '0.4', 'B': '0.6'}])

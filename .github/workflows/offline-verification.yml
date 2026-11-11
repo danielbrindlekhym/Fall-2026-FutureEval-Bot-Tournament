@@ -530,6 +530,15 @@ jobs:
       ACCEPTED_TEST_SUMMARY_NEW_BLOB: 60e7271a3fcd2340b584a4045f48d7c4ea4d75d8
       ACCEPTED_TEST_SUMMARY_PR15_BLOB: 979ed33b351800aafd4f819deb8909bd967b9b14
       ACCEPTED_TEST_SUMMARY_V2_BLOB: 3a973fc489e3621e7f9c9597ba19aa45bd0b48b1
+      PRIOR_REVIEWED_HEAD_SHA: eaa4b8c551afe74c55010c66e7a79a852d5fe8f6
+      ACCEPTED_TEST_FAILURE_DIAGNOSTICS_BLOB: b6ce4b2d12d338e72b987ea779eb24aa9286971b
+      ACCEPTED_TEST_OVERFLOW_GUARD_BLOB: ea77cd8a6ac60ea97ae971ce110cd3c5535345b9
+      ACCEPTED_TEST_RATE_LIMIT_CIRCUIT_BLOB: 21417aabe309f143d2373200065ebfd3c7fc41fb
+      ACCEPTED_TEST_READINESS_REASON_DIAGNOSTICS_BLOB: 5cb9faa0c440303e20225c09d3212f83a4a4395e
+      ACCEPTED_BASE_TEST_FAILURE_DIAGNOSTICS_BLOB: 525a572e821065161962298a6e290d928aa230ff
+      ACCEPTED_BASE_TEST_OVERFLOW_GUARD_BLOB: 67e07b4041751a91e264df155371474b10eef625
+      ACCEPTED_BASE_TEST_RATE_LIMIT_CIRCUIT_BLOB: 02ca5cd033a96c7ae6ab6832dca516705fa9973e
+      ACCEPTED_BASE_TEST_READINESS_REASON_DIAGNOSTICS_BLOB: 86dc3d0146f966266c63836fca358f55ebc87d3a
       ACCEPTED_BASE_FORECAST_WORKFLOW_BLOB: 39a86c773ab58a70ad976955257220e9c458a61c
       ACCEPTED_BASE_MAIN_BLOB: 9c17009042d389ec66fe823c76396310de8192e8
       ACCEPTED_BASE_API_BLOB: ada383ad9cc696f9d2cfa4492dd67dba6229d2be
@@ -557,10 +566,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 2
+          fetch-depth: 3
           persist-credentials: false
 
-      - name: Assert exact base, candidate blobs, and thirteen-path allowlist
+      - name: Assert exact ancestry, candidate blobs, and seventeen-path allowlist
         shell: bash
         run: |
           set -euo pipefail
@@ -570,7 +579,8 @@ jobs:
           test "$(git rev-parse "$ACCEPTED_BASE_SHA^{tree}")" = "$ACCEPTED_BASE_TREE"
           actual_head="$(git rev-parse HEAD)"
           test "$actual_head" = "$EXPECTED_HEAD_SHA"
-          test "$(git rev-parse HEAD^)" = "$ACCEPTED_BASE_SHA"
+          test "$(git rev-parse HEAD^)" = "$PRIOR_REVIEWED_HEAD_SHA"
+          test "$(git rev-parse HEAD^^)" = "$ACCEPTED_BASE_SHA"
           test "$(git merge-base "$ACCEPTED_BASE_SHA" "$actual_head")" = "$ACCEPTED_BASE_SHA"
           test "$(git rev-parse HEAD:.github/workflows/forecast.yml)" = "$ACCEPTED_FORECAST_WORKFLOW_BLOB"
           test "$(git rev-parse HEAD:futureeval_bot/__main__.py)" = "$ACCEPTED_MAIN_BLOB"
@@ -584,6 +594,10 @@ jobs:
           test "$(git rev-parse HEAD:tests/test_operational_summary.py)" = "$ACCEPTED_TEST_SUMMARY_NEW_BLOB"
           test "$(git rev-parse HEAD:tests/test_operational_summary_pr15_ci.py)" = "$ACCEPTED_TEST_SUMMARY_PR15_BLOB"
           test "$(git rev-parse HEAD:tests/test_operational_summary_v2.py)" = "$ACCEPTED_TEST_SUMMARY_V2_BLOB"
+          test "$(git rev-parse HEAD:tests/test_failure_diagnostics.py)" = "$ACCEPTED_TEST_FAILURE_DIAGNOSTICS_BLOB"
+          test "$(git rev-parse HEAD:tests/test_overflow_guard.py)" = "$ACCEPTED_TEST_OVERFLOW_GUARD_BLOB"
+          test "$(git rev-parse HEAD:tests/test_rate_limit_circuit.py)" = "$ACCEPTED_TEST_RATE_LIMIT_CIRCUIT_BLOB"
+          test "$(git rev-parse HEAD:tests/test_readiness_reason_diagnostics.py)" = "$ACCEPTED_TEST_READINESS_REASON_DIAGNOSTICS_BLOB"
           test "$(git rev-parse "$ACCEPTED_BASE_SHA:.github/workflows/offline-verification.yml")" = "$ACCEPTED_WORKFLOW_BASE_BLOB"
           test "$(git rev-parse "$ACCEPTED_BASE_SHA:.github/workflows/forecast.yml")" = "$ACCEPTED_BASE_FORECAST_WORKFLOW_BLOB"
           test "$(git rev-parse "$ACCEPTED_BASE_SHA:futureeval_bot/__main__.py")" = "$ACCEPTED_BASE_MAIN_BLOB"
@@ -596,6 +610,10 @@ jobs:
           test "$(git rev-parse "$ACCEPTED_BASE_SHA:tests/test_delivery_proof.py")" = "$ACCEPTED_BASE_TEST_DELIVERY_BLOB"
           test "$(git rev-parse "$ACCEPTED_BASE_SHA:tests/test_operational_summary_pr15_ci.py")" = "$ACCEPTED_BASE_TEST_SUMMARY_PR15_BLOB"
           test "$(git rev-parse "$ACCEPTED_BASE_SHA:tests/test_operational_summary_v2.py")" = "$ACCEPTED_BASE_TEST_SUMMARY_V2_BLOB"
+          test "$(git rev-parse "$ACCEPTED_BASE_SHA:tests/test_failure_diagnostics.py")" = "$ACCEPTED_BASE_TEST_FAILURE_DIAGNOSTICS_BLOB"
+          test "$(git rev-parse "$ACCEPTED_BASE_SHA:tests/test_overflow_guard.py")" = "$ACCEPTED_BASE_TEST_OVERFLOW_GUARD_BLOB"
+          test "$(git rev-parse "$ACCEPTED_BASE_SHA:tests/test_rate_limit_circuit.py")" = "$ACCEPTED_BASE_TEST_RATE_LIMIT_CIRCUIT_BLOB"
+          test "$(git rev-parse "$ACCEPTED_BASE_SHA:tests/test_readiness_reason_diagnostics.py")" = "$ACCEPTED_BASE_TEST_READINESS_REASON_DIAGNOSTICS_BLOB"
           if git cat-file -e "$ACCEPTED_BASE_SHA:tests/test_operational_summary.py" 2>/dev/null; then
             echo "The new attribution test path unexpectedly exists at the accepted base." >&2
             exit 1
@@ -617,10 +635,10 @@ jobs:
           git fetch --no-tags --depth=1 origin "$HISTORICAL_READINESS_COMMIT"
           test "$(git rev-parse "$HISTORICAL_READINESS_COMMIT^{commit}")" = "$HISTORICAL_READINESS_COMMIT"
           test "$(git rev-parse "$HISTORICAL_READINESS_COMMIT^{tree}")" = "$HISTORICAL_READINESS_TREE"
-          expected_paths=$'.github/workflows/forecast.yml\n.github/workflows/offline-verification.yml\nfutureeval_bot/__main__.py\nfutureeval_bot/api.py\nfutureeval_bot/cloud.py\nfutureeval_bot/core.py\nfutureeval_bot/forecast.py\nfutureeval_bot/operational_summary.py\ntests/test_bot.py\ntests/test_delivery_proof.py\ntests/test_operational_summary.py\ntests/test_operational_summary_pr15_ci.py\ntests/test_operational_summary_v2.py'
+          expected_paths=$'.github/workflows/forecast.yml\n.github/workflows/offline-verification.yml\nfutureeval_bot/__main__.py\nfutureeval_bot/api.py\nfutureeval_bot/cloud.py\nfutureeval_bot/core.py\nfutureeval_bot/forecast.py\nfutureeval_bot/operational_summary.py\ntests/test_bot.py\ntests/test_delivery_proof.py\ntests/test_failure_diagnostics.py\ntests/test_operational_summary.py\ntests/test_operational_summary_pr15_ci.py\ntests/test_operational_summary_v2.py\ntests/test_overflow_guard.py\ntests/test_rate_limit_circuit.py\ntests/test_readiness_reason_diagnostics.py'
           actual_paths="$(git diff --name-only "$ACCEPTED_BASE_SHA" "$actual_head" | LC_ALL=C sort)"
           test "$actual_paths" = "$expected_paths"
-          printf 'Attribution candidate PR #%s head %s; accepted base %s; exactly 13 reviewed paths and all pinned source blobs verified.\n' "$EXPECTED_PR_NUMBER" "$actual_head" "$ACCEPTED_BASE_SHA" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Attribution candidate PR #%s head %s follows reviewed head %s and accepted base %s; exactly 17 reviewed paths and all pinned source/test blobs verified.\n' "$EXPECTED_PR_NUMBER" "$actual_head" "$PRIOR_REVIEWED_HEAD_SHA" "$ACCEPTED_BASE_SHA" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Set up Python 3.12
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
