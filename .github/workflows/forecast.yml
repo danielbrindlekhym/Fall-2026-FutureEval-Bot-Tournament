@@ -64,9 +64,12 @@ jobs:
         id: run_selected_operation
         env:
           REQUESTED_MODE: ${{ inputs.mode || 'live' }}
+          BOT_REPOSITORY: ${{ github.repository }}
+          BOT_WORKFLOW_PATH: .github/workflows/forecast.yml
           BOT_WORKFLOW_RUN_ID: ${{ github.run_id }}
           BOT_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
           BOT_SOURCE_SHA: ${{ github.sha }}
+          BOT_TRIGGER_EVENT: ${{ github.event_name }}
         run: |
           BOT_OPERATION_STARTED_AT="$(date -u +'%Y-%m-%dT%H:%M:%SZ')" || BOT_OPERATION_STARTED_AT=''
           export BOT_OPERATION_STARTED_AT
@@ -84,6 +87,8 @@ jobs:
           BOT_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
           BOT_OPERATION_OUTCOME: ${{ steps.run_selected_operation.outcome || 'unknown' }}
           BOT_OPERATION_MODE: ${{ inputs.mode || 'live' }}
+          BOT_REPOSITORY: ${{ github.repository }}
+          BOT_WORKFLOW_PATH: .github/workflows/forecast.yml
           BOT_TRIGGER_EVENT: ${{ github.event_name }}
           BOT_SOURCE_SHA: ${{ github.sha }}
           BOT_STEP_CHECKOUT_OUTCOME: ${{ steps.checkout.outcome || 'unknown' }}

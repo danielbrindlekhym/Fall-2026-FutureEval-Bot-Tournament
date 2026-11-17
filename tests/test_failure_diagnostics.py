@@ -106,7 +106,7 @@ def test_run_keeps_failure_and_exports_only_safe_diagnostics(setup, monkeypatch)
     model.config = config
     result = run(config, state, Remote(), model, practice=True)
     assert result['failures'] == [{'question_id': 1, 'error_type': 'NoValidatedForecast',
-        'diagnostics': diagnostics}]
+        'stage': 'forecast_validation', 'failure_category': 'validation', 'diagnostics': diagnostics}]
     assert state.job(1)['payload'] is None
     assert model.config == config
 

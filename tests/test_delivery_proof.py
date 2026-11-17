@@ -532,12 +532,12 @@ class DeliveryProofTests(unittest.TestCase):
             rendered = collect_summary(db_path, config_path=config_path, env=env)
             after = db_path.read_bytes()
             self.assertEqual(before, after, "summary must leave the database unchanged")
-            self.assertEqual(rendered["delivery_proof_status"], "available")
-            self.assertEqual(rendered["delivery_proof_observed_rows"], 3)
-            self.assertEqual(rendered["delivery_proof_scope"],
-                             "run_observed_subset_not_released_question_or_seasonal_denominator")
-            self.assertEqual(rendered["delivery_proof_counts"],
-                             {"paired": 2, "on_time": 1, "late": 1, "unknown": 1})
+            # Legacy timestamp-window proofs remain immutable but cannot be
+            # attributed to a run without an operation envelope and receipt events.
+            self.assertEqual(rendered["delivery_proof_status"], "unknown")
+            self.assertIsNone(rendered["delivery_proof_observed_rows"])
+            self.assertIsNone(rendered["delivery_proof_scope"])
+            self.assertIsNone(rendered["delivery_proof_counts"])
             public = json.dumps(rendered, sort_keys=True)
             for forbidden in ("synthetic reasoning", MARKER, '"question_id"', '"created_at"',
                               '"start_time"', '"post_id"', '"author_id"'):

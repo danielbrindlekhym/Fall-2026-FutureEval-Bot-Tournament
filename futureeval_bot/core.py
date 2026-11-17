@@ -179,12 +179,33 @@ class State:
             CREATE TABLE IF NOT EXISTS calls(
                 id INTEGER PRIMARY KEY, question_id INTEGER NOT NULL, day TEXT NOT NULL,
                 model TEXT NOT NULL, status TEXT NOT NULL, response TEXT, cost REAL, created TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS operations(
+                operation_id TEXT PRIMARY KEY, repository TEXT NOT NULL, workflow_path TEXT NOT NULL,
+                workflow_run_id TEXT NOT NULL, workflow_run_attempt TEXT NOT NULL, source_sha TEXT NOT NULL,
+                config_fingerprint TEXT NOT NULL,
+                trigger_event TEXT NOT NULL, requested_mode TEXT NOT NULL, started_at TEXT NOT NULL,
+                finished_at TEXT, status TEXT NOT NULL, failure_stage TEXT, failure_category TEXT,
+                failure_stage_counts TEXT, failure_category_counts TEXT,
+                checkpoint_continuity TEXT NOT NULL, observed_questions INTEGER);
+            CREATE TABLE IF NOT EXISTS call_attribution(
+                call_id INTEGER PRIMARY KEY, operation_id TEXT NOT NULL, workflow_run_id TEXT NOT NULL,
+                workflow_run_attempt TEXT NOT NULL, source_sha TEXT NOT NULL, reserved_at TEXT NOT NULL,
+                outcome_status TEXT NOT NULL, cost_receipt_status TEXT NOT NULL,
+                cost_received_at TEXT);
+            CREATE TABLE IF NOT EXISTS receipt_events(
+                id INTEGER PRIMARY KEY, operation_id TEXT NOT NULL, question_id INTEGER NOT NULL,
+                receipt_type TEXT NOT NULL CHECK(receipt_type IN ('forecast','reasoning')),
+                match_status TEXT NOT NULL CHECK(match_status IN ('matched','mismatched','unknown')),
+                timing_status TEXT NOT NULL CHECK(timing_status IN ('on_time','late','unknown')),
+                server_at TEXT, deadline_at TEXT, observed_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS delivery_proof(
                 question_id INTEGER PRIMARY KEY, workflow_run_id TEXT, workflow_run_attempt TEXT,
                 paired INTEGER NOT NULL CHECK(paired IN (0,1)),
                 status TEXT NOT NULL CHECK(status IN ('on_time','late','unknown')));
         """)
         self.db.commit()
+        self.active_operation_id = None
+        self.operation_stage = "unknown"
 
     def close(self):
         self.db.close()
@@ -200,6 +221,107 @@ class State:
     def set_meta(self, key: str, value: Any):
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", (key, canonical(value)))
+        self.persist()
+
+    def start_operation(self, envelope: dict) -> bool:
+        """Bind only a well-formed hosted attempt after validated checkpoint attach."""
+        required = ("repository", "workflow_path", "workflow_run_id", "workflow_run_attempt",
+                    "source_sha", "config_fingerprint", "trigger_event", "requested_mode", "started_at")
+        if self.checkpoint is None or not isinstance(envelope, dict) or any(not envelope.get(k) for k in required):
+            return False
+        if (envelope["workflow_path"] != ".github/workflows/forecast.yml"
+                or envelope["repository"] != "danielbrindlekhym/Fall-2026-FutureEval-Bot-Tournament"
+                or not str(envelope["workflow_run_id"]).isdigit() or len(str(envelope["workflow_run_id"])) > 24
+                or not str(envelope["workflow_run_attempt"]).isdigit() or len(str(envelope["workflow_run_attempt"])) > 8
+                or not isinstance(envelope["source_sha"], str)
+                or len(envelope["source_sha"]) != 40
+                or any(c not in "0123456789abcdef" for c in envelope["source_sha"].lower())
+                or envelope["trigger_event"] not in {"schedule", "workflow_dispatch"}
+                or envelope["requested_mode"] not in {"live", "practice"}):
+            return False
+        started = timestamp(envelope["started_at"])
+        if started is None:
+            return False
+        operation_id = "/".join((envelope["repository"], str(envelope["workflow_run_id"]),
+                                  str(envelope["workflow_run_attempt"])))
+        with self.db:
+            self.db.execute(
+                "INSERT INTO operations(operation_id,repository,workflow_path,workflow_run_id,"
+                "workflow_run_attempt,source_sha,config_fingerprint,trigger_event,requested_mode,started_at,status,"
+                "checkpoint_continuity) VALUES(?,?,?,?,?,?,?,?,?,?,'started','verified')",
+                (operation_id, envelope["repository"], envelope["workflow_path"],
+                 str(envelope["workflow_run_id"]), str(envelope["workflow_run_attempt"]),
+                 envelope["source_sha"].lower(), envelope["config_fingerprint"], envelope["trigger_event"],
+                 envelope["requested_mode"], started.isoformat().replace("+00:00", "Z")))
+        self.persist()
+        self.active_operation_id = operation_id
+        self.operation_stage = "operation_init"
+        return True
+
+    def set_operation_stage(self, stage: str):
+        allowed = {"operation_init", "checkpoint_restore", "readiness", "inventory", "research",
+                   "model_reservation", "model_request", "model_cost_receipt", "forecast_validation",
+                   "payload_freeze", "forecast_submission", "reasoning_submission",
+                   "receipt_verification", "summary_publication", "cleanup", "unknown"}
+        self.operation_stage = stage if stage in allowed else "unknown"
+
+    def finish_operation(self, status: str, *, failure_stage: str | None = None,
+                         failure_category: str | None = None, observed_questions: int | None = None,
+                         failures: list[dict] | None = None):
+        if not self.active_operation_id:
+            return
+        statuses = {"completed", "completed_with_failures", "failed"}
+        categories = {"timeout", "transport_unconfirmed", "authentication", "rate_limited",
+                      "payment_or_cost", "provider_error", "invalid_response", "validation",
+                      "deadline", "frozen_payload_conflict", "receipt_missing", "checkpoint_stale",
+                      "inventory_incomplete", "internal", "other", "unknown"}
+        stages = {"operation_init", "checkpoint_restore", "readiness", "inventory", "research",
+                  "model_reservation", "model_request", "model_cost_receipt", "forecast_validation",
+                  "payload_freeze", "forecast_submission", "reasoning_submission",
+                  "receipt_verification", "summary_publication", "cleanup", "unknown"}
+        if status not in statuses:
+            status = "failed"
+        stage = failure_stage if failure_stage in stages else None
+        category = failure_category if failure_category in categories else None
+        stage_counts, category_counts = {}, {}
+        for item in failures or []:
+            if not isinstance(item, dict):
+                continue
+            s, c = item.get("stage"), item.get("failure_category")
+            if s in stages:
+                stage_counts[s] = stage_counts.get(s, 0) + 1
+            if c in categories:
+                category_counts[c] = category_counts.get(c, 0) + 1
+        if stage and not stage_counts:
+            stage_counts[stage] = 1
+        if category and not category_counts:
+            category_counts[category] = 1
+        with self.db:
+            self.db.execute("UPDATE operations SET finished_at=?,status=?,failure_stage=?,failure_category=?,"
+                            "failure_stage_counts=?,failure_category_counts=?,observed_questions=? "
+                            "WHERE operation_id=? AND status='started'",
+                            (utcnow().isoformat().replace("+00:00", "Z"), status, stage, category,
+                             canonical(stage_counts), canonical(category_counts),
+                             observed_questions if type(observed_questions) is int and observed_questions >= 0 else None,
+                             self.active_operation_id))
+        self.persist()
+
+    def append_receipt_event(self, question_id: int, receipt_type: str, match_status: str,
+                             timing_status: str, server_at: str | None, deadline_at: str | None):
+        if not self.active_operation_id or receipt_type not in {"forecast", "reasoning"}:
+            return
+        if match_status not in {"matched", "mismatched", "unknown"}:
+            match_status = "unknown"
+        if timing_status not in {"on_time", "late", "unknown"}:
+            timing_status = "unknown"
+        for value in (server_at, deadline_at):
+            if value is not None and timestamp(value) is None:
+                raise ValueError("Receipt timestamps must be valid UTC values")
+        with self.db:
+            self.db.execute("INSERT INTO receipt_events(operation_id,question_id,receipt_type,match_status,"
+                            "timing_status,server_at,deadline_at,observed_at) VALUES(?,?,?,?,?,?,?,?)",
+                            (self.active_operation_id, question_id, receipt_type, match_status, timing_status,
+                             server_at, deadline_at, utcnow().isoformat().replace("+00:00", "Z")))
         self.persist()
 
     def discover(self, contract: Contract, config: Config):
@@ -275,6 +397,8 @@ class State:
         allowed = {"phase", "research", "payload", "explanation", "samples", "comment_id", "error"}
         if not values.keys() <= allowed:
             raise ValueError("Unexpected job column")
+        if "payload" in values:
+            self.set_operation_stage("payload_freeze")
         previous = self.job(question_id)
         for frozen in ("payload", "explanation", "samples"):
             if frozen in values and previous[frozen] is not None and previous[frozen] != values[frozen]:
@@ -306,15 +430,30 @@ class State:
     def reserve_call(self, question_id: int, model: str, config: Config, *, cost_receipt_guard=False) -> int:
         if cost_receipt_guard and (self.cost_receipt_halted or self.meta("cost_guard_halt")):
             raise RuntimeError("Cost receipt guard is halted pending an audit")
+        self.set_operation_stage("model_reservation")
         day = utcnow().date().isoformat()
         with self.db:
             daily = self.db.execute("SELECT COUNT(*) FROM calls WHERE day=?", (day,)).fetchone()[0]
             question = self.db.execute("SELECT COUNT(*) FROM calls WHERE question_id=?", (question_id,)).fetchone()[0]
             if daily >= config.max_calls_per_day or question >= config.max_calls_per_question:
                 raise RuntimeError("Free call allowance exhausted; waiting for a later eligible run")
+            operation = None
+            if self.active_operation_id:
+                operation = self.db.execute("SELECT workflow_run_id,workflow_run_attempt,source_sha FROM operations "
+                                             "WHERE operation_id=? AND status='started'",
+                                             (self.active_operation_id,)).fetchone()
+                if operation is None:
+                    raise RuntimeError("Operation binding is unavailable; no model reservation was created")
+            created = utcnow().isoformat().replace("+00:00", "Z")
             cursor = self.db.execute("INSERT INTO calls(question_id,day,model,status,created) VALUES(?,?,?,?,?)",
-                (question_id, day, model, "started", utcnow().isoformat()))
+                (question_id, day, model, "started", created))
             call_id = cursor.lastrowid
+            if operation:
+                self.db.execute("INSERT INTO call_attribution(call_id,operation_id,workflow_run_id,"
+                    "workflow_run_attempt,source_sha,reserved_at,outcome_status,cost_receipt_status) "
+                    "VALUES(?,?,?,?,?,?,?,?)",
+                    (call_id, self.active_operation_id, operation[0], operation[1], operation[2],
+                     created, "started", "unknown"))
             if cost_receipt_guard:
                 self.db.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", ("cost_guard_halt", canonical(
                     {"call_id": call_id, "reason": "pending_zero_cost_receipt", "at": utcnow().isoformat()})))
@@ -340,8 +479,14 @@ class State:
     def finish_call(self, call_id: int, response: dict, cost: float | None, *, cost_receipt_guard=False):
         if cost_receipt_guard:
             self._check_cost_receipt_guard(call_id)
+        self.set_operation_stage("model_cost_receipt")
         with self.db:
-            self.db.execute("UPDATE calls SET status='done',response=?,cost=? WHERE id=?", (canonical(response), cost, call_id))
+            self.db.execute("UPDATE calls SET status='done',response=?,cost=? WHERE id=?",
+                            (canonical(response), cost, call_id))
+            self.db.execute("UPDATE call_attribution SET outcome_status='completed',cost_receipt_status=?,"
+                            "cost_received_at=? WHERE call_id=?",
+                            ("confirmed" if cost is not None and math.isfinite(cost) else "missing",
+                             utcnow().isoformat().replace("+00:00", "Z"), call_id))
             if cost_receipt_guard and cost == 0:
                 self.db.execute("DELETE FROM meta WHERE key='cost_guard_halt'")
         self.persist()
