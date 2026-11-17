@@ -530,7 +530,8 @@ jobs:
       ACCEPTED_TEST_SUMMARY_NEW_BLOB: 60e7271a3fcd2340b584a4045f48d7c4ea4d75d8
       ACCEPTED_TEST_SUMMARY_PR15_BLOB: 979ed33b351800aafd4f819deb8909bd967b9b14
       ACCEPTED_TEST_SUMMARY_V2_BLOB: 3a973fc489e3621e7f9c9597ba19aa45bd0b48b1
-      PRIOR_REVIEWED_HEAD_SHA: eaa4b8c551afe74c55010c66e7a79a852d5fe8f6
+      PRIOR_REVIEWED_HEAD_SHA: bcd8fb53d78f435d2ae1a7238214e317fd92086f
+      EARLIER_REVIEWED_HEAD_SHA: eaa4b8c551afe74c55010c66e7a79a852d5fe8f6
       ACCEPTED_TEST_FAILURE_DIAGNOSTICS_BLOB: b6ce4b2d12d338e72b987ea779eb24aa9286971b
       ACCEPTED_TEST_OVERFLOW_GUARD_BLOB: ea77cd8a6ac60ea97ae971ce110cd3c5535345b9
       ACCEPTED_TEST_RATE_LIMIT_CIRCUIT_BLOB: 21417aabe309f143d2373200065ebfd3c7fc41fb
@@ -566,7 +567,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 3
+          fetch-depth: 4
           persist-credentials: false
 
       - name: Assert exact ancestry, candidate blobs, and seventeen-path allowlist
@@ -580,8 +581,12 @@ jobs:
           actual_head="$(git rev-parse HEAD)"
           test "$actual_head" = "$EXPECTED_HEAD_SHA"
           test "$(git rev-parse HEAD^)" = "$PRIOR_REVIEWED_HEAD_SHA"
-          test "$(git rev-parse HEAD^^)" = "$ACCEPTED_BASE_SHA"
+          test "$(git rev-parse HEAD^^)" = "$EARLIER_REVIEWED_HEAD_SHA"
+          test "$(git rev-parse HEAD^^^)" = "$ACCEPTED_BASE_SHA"
           test "$(git merge-base "$ACCEPTED_BASE_SHA" "$actual_head")" = "$ACCEPTED_BASE_SHA"
+          expected_followup_paths='.github/workflows/offline-verification.yml'
+          actual_followup_paths="$(git diff-tree --no-commit-id --name-only -r HEAD^ HEAD | LC_ALL=C sort)"
+          test "$actual_followup_paths" = "$expected_followup_paths"
           test "$(git rev-parse HEAD:.github/workflows/forecast.yml)" = "$ACCEPTED_FORECAST_WORKFLOW_BLOB"
           test "$(git rev-parse HEAD:futureeval_bot/__main__.py)" = "$ACCEPTED_MAIN_BLOB"
           test "$(git rev-parse HEAD:futureeval_bot/api.py)" = "$ACCEPTED_API_BLOB"
@@ -771,8 +776,6 @@ jobs:
               raise SystemExit('report checks do not match the expected collected JUnit cases')
           if [item.get('name') if isinstance(item, dict) else None for item in checks] != [case.attrib.get('name') for case in cases]:
               raise SystemExit('report check names do not match JUnit case names')
-          if any(case.find(tag) is not None for case in cases for tag in ('failure', 'error', 'skipped')):
-              raise SystemExit('one or more tests failed, errored, or skipped')
           if any(not isinstance(item, dict) or item.get('passed') is not True for item in checks):
               raise SystemExit('one or more report checks failed or are malformed')
           required_attribution = {
@@ -788,13 +791,67 @@ jobs:
               'tests/test_operational_summary.py::test_missing_summary_can_be_reconstructed_from_durable_bound_ledger',
               'tests/test_operational_summary.py::test_output_uses_allowlisted_counts_and_fixed_failure_categories_only',
           }
-          observed_attribution = {
-              f"{case.attrib.get('file')}::{case.attrib.get('name')}"
-              for case in cases
-              if case.attrib.get('file') == 'tests/test_operational_summary.py'
-          }
-          if observed_attribution != required_attribution:
+          def attribution_node_ids(junit_cases):
+              # pytest 9.1.1's default xunit2 family keeps the module in
+              # classname (dots) and the function in name; it omits file.
+              return [
+                  f"tests/test_operational_summary.py::{case.attrib.get('name')}"
+                  for case in junit_cases
+                  if case.attrib.get('classname') == 'tests.test_operational_summary'
+              ]
+
+          def attribution_matches(junit_cases):
+              observed = attribution_node_ids(junit_cases)
+              return (
+                  len(observed) == len(required_attribution)
+                  and len(set(observed)) == len(observed)
+                  and set(observed) == required_attribution
+              )
+
+          def junit_has_failure_or_skip(junit_cases):
+              return any(
+                  case.find(tag) is not None
+                  for case in junit_cases
+                  for tag in ('failure', 'error', 'skipped')
+              )
+
+          if junit_has_failure_or_skip(cases):
+              raise SystemExit('one or more tests failed, errored, or skipped')
+
+          def synthetic_cases(rows):
+              root = ET.Element('testsuites')
+              suite = ET.SubElement(root, 'testsuite', {'name': 'pytest tests'})
+              for classname, name, marker in rows:
+                  case = ET.SubElement(
+                      suite, 'testcase',
+                      {'classname': classname, 'name': name, 'time': '0.000'},
+                  )
+                  if marker:
+                      ET.SubElement(case, marker)
+              return list(root.iter('testcase'))
+
+          module = 'tests.test_operational_summary'
+          valid_rows = [(module, node_id.split('::', 1)[1], '') for node_id in sorted(required_attribution)]
+          valid_synthetic = synthetic_cases(valid_rows)
+          if any('file' in case.attrib for case in valid_synthetic) or not attribution_matches(valid_synthetic):
+              raise SystemExit('synthetic xunit2 classname/name attribution regression failed')
+          missing_synthetic = synthetic_cases(valid_rows[:-1])
+          wrong_rows = list(valid_rows)
+          wrong_rows[0] = ('tests.other_module', wrong_rows[0][1], '')
+          wrong_synthetic = synthetic_cases(wrong_rows)
+          duplicate_synthetic = synthetic_cases(valid_rows + [valid_rows[0]])
+          if any(attribution_matches(candidate) for candidate in (missing_synthetic, wrong_synthetic, duplicate_synthetic)):
+              raise SystemExit('synthetic missing/wrong/duplicate attribution was accepted')
+          for marker in ('failure', 'error', 'skipped'):
+              marked = list(valid_rows)
+              marked[0] = (marked[0][0], marked[0][1], marker)
+              if not junit_has_failure_or_skip(synthetic_cases(marked)):
+                  raise SystemExit(f'synthetic JUnit {marker} evidence was accepted')
+
+          observed_attribution = set(attribution_node_ids(cases))
+          if not attribution_matches(cases):
               raise SystemExit('attribution JUnit cases differ from the 11 reviewed collection node IDs')
+          print('JUnit attribution matched 11 exact node IDs using pytest 9.1.1 xunit2 classname/name; synthetic mismatch and failure/skip guards passed.')
           report_hash = hashlib.sha256(report_bytes).hexdigest()
           junit_hash = hashlib.sha256(junit_bytes).hexdigest()
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
