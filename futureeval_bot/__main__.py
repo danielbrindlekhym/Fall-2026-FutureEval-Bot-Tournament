@@ -73,25 +73,20 @@ def run(config: Config, state: State, remote, model, *, practice=False, max_ques
     project = config.practice_project if practice else config.season_project
     if not practice:
         live_gate(config, state)
-    # Reconcile the whole feed, including closed questions missed during downtime.
+    # Reconcile the whole feed before any question discovery or forecasting.
     state.set_operation_stage("inventory")
-    posts = remote.posts(project)
+    inventory = InventoryDiagnostics(state)
+    posts, contracts, skipped = collect_inventory(
+        remote, project, state, config, inventory, supported=SUPPORTED,
+        contract_factory=Contract.from_post,
+        is_future=lambda contract: contract.status == "upcoming" or
+            (contract.open_time and timestamp(contract.open_time) > utcnow()),
+        service_error=ServiceError,
+        on_invalid_post=lambda post: state.set_meta(
+            "feed_parse_error_" + str(post.get("id")),
+            {"at": utcnow().isoformat(), "post_id": post.get("id")}),
+    )
     feed_checked_at = utcnow().isoformat()
-    contracts, skipped = {}, 0
-    for post in posts:
-        q = post.get("question") or {}
-        if q.get("type") not in SUPPORTED:
-            skipped += 1
-            continue
-        try:
-            contract = Contract.from_post(post, project)
-            if contract.status == "upcoming" or (contract.open_time and timestamp(contract.open_time) > utcnow()):
-                continue
-            state.discover(contract, config)
-            contracts[contract.question_id] = contract
-        except (ValueError, KeyError, TypeError):
-            state.set_meta("feed_parse_error_" + str(post.get("id")), {"at": utcnow().isoformat(), "post_id": post.get("id")})
-            raise ServiceError("Supported question metadata failed validation; see saved post identifier") from None
 
     if practice:
         # Choose one fixed available example of each format, not whichever produces a desired answer.
@@ -102,20 +97,33 @@ def run(config: Config, state: State, remote, model, *, practice=False, max_ques
         wanted = set(selected.values())
     else:
         wanted = set(contracts)
-        if not state.meta("launch_time"):
-            state.set_meta("launch_time", utcnow().isoformat())
-            state.set_meta("launch_config", asdict(config))
+        try:
+            launch_time = state.meta("launch_time")
+        except Exception:
+            inventory.failed("state_read_failed")
+            raise
+        if not launch_time:
+            try:
+                state.set_meta("launch_time", utcnow().isoformat())
+                state.set_meta("launch_config", asdict(config))
+            except Exception:
+                inventory.failed("state_write_failed")
+                raise
     work = []
-    for job in state.jobs(project):
-        if job["phase"] in {"verified", "external_forecast", "missed"}:
-            continue
-        contract = contracts.get(job["question_id"])
-        if contract is None:
-            contract = state.contract(job["question_id"])
-        if job["payload"]:
-            work.append((0, contract, job))
-        elif contract.question_id in wanted:
-            work.append((1, contract, job))
+    try:
+        for job in state.jobs(project):
+            if job["phase"] in {"verified", "external_forecast", "missed"}:
+                continue
+            contract = contracts.get(job["question_id"])
+            if contract is None:
+                contract = state.contract(job["question_id"])
+            if job["payload"]:
+                work.append((0, contract, job))
+            elif contract.question_id in wanted:
+                work.append((1, contract, job))
+    except Exception:
+        inventory.failed("state_read_failed")
+        raise
     work.sort(key=lambda item: (item[0], timestamp(item[1].close_time), item[1].question_id))
     attempted, failures = 0, []
     for _, contract, job in work:

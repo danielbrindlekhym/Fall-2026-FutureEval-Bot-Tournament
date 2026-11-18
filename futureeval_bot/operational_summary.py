@@ -12,6 +12,8 @@ from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .inventory_diagnostics import summary_diagnostics, UNKNOWN_DIAGNOSTICS
+
 _PHASES = {"discovered", "researched", "forecasted", "submitted", "verified", "missed", "external_forecast"}
 _ERROR_TYPES = {"NoValidatedForecast", "ServiceError", "ValueError", "KeyError", "TypeError",
                 "IndexError", "OSError", "RuntimeError", "TimeoutError"}
@@ -206,6 +208,7 @@ def collect_summary(database: str | Path, *, config_path: str | Path = "config.j
     """Read only allowlisted aggregate/status columns; never select payload or response data."""
     env = dict(os.environ if env is None else env)
     result, start, finish, run_id, attempt = _context(env, config_path)
+    result["inventory_diagnostics"] = dict(UNKNOWN_DIAGNOSTICS)
     db_path = Path(database)
     if not db_path.is_file():
         result.update(summary_status="unavailable", unavailable_reason="database_missing")
@@ -238,6 +241,7 @@ def collect_summary(database: str | Path, *, config_path: str | Path = "config.j
             op = None
             call_rows = None
             receipt_rows = None
+            inventory_raw = None
             if op_id and {"operations", "call_attribution", "receipt_events"} <= table_names:
                 op = db.execute(
                     "SELECT operation_id,repository,workflow_path,workflow_run_id,workflow_run_attempt,"
@@ -246,6 +250,12 @@ def collect_summary(database: str | Path, *, config_path: str | Path = "config.j
                     "checkpoint_continuity,observed_questions FROM operations WHERE operation_id=?", (op_id,)
                 ).fetchone()
                 if op is not None:
+                    try:
+                        row = db.execute("SELECT value FROM meta WHERE key=?",
+                            ("inventory_diagnostics:" + op_id,)).fetchone()
+                        inventory_raw = row[0] if row is not None else None
+                    except sqlite3.Error:
+                        inventory_raw = None
                     call_rows = db.execute(
                         "SELECT c.id,c.status,c.cost,a.workflow_run_id,a.workflow_run_attempt,a.source_sha,"
                         "a.outcome_status,a.cost_receipt_status,a.cost_received_at "
@@ -271,6 +281,14 @@ def collect_summary(database: str | Path, *, config_path: str | Path = "config.j
             if not row_mismatch:
                 result["run_binding_status"] = "bound_complete"
                 result["run_attribution_status"] = "complete"
+                expected_inventory_binding = {
+                    "operation_id": op["operation_id"], "repository": op["repository"],
+                    "workflow_path": op["workflow_path"], "workflow_run_id": op["workflow_run_id"],
+                    "workflow_run_attempt": op["workflow_run_attempt"], "source_sha": op["source_sha"],
+                    "config_fingerprint": op["config_fingerprint"], "started_at": op["started_at"],
+                }
+                result["inventory_diagnostics"] = summary_diagnostics(
+                    inventory_raw, expected_inventory_binding, op["status"])
                 result["operation_outcome"] = op["status"]
                 result["run_observed_questions"] = op["observed_questions"]
                 def safe_counter(raw, allowed):
