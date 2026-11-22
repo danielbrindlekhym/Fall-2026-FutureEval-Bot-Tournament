@@ -71,7 +71,7 @@ def test_pr15_category_allowlist_and_projection_remain_privacy_limited(tmp_path:
         "operation_failure_stage_counts", "operation_failure_category_counts", "run_reservations",
         "run_reservation_status", "run_completed_with_cost_receipt", "run_missing_cost_receipt",
         "run_unknown_request_outcome", "run_recorded_cost_sum_usd", "run_cost_status",
-        "run_observed_questions", "run_receipt_counts",
+        "run_observed_questions", "run_receipt_counts", "inventory_diagnostics",
     }
     assert summary["summary_status"] == "available"
     assert summary["operation_step_outcome"] == "failure"
@@ -90,6 +90,11 @@ def test_pr15_category_allowlist_and_projection_remain_privacy_limited(tmp_path:
     assert summary["window_calls"] is None
     assert summary["window_recorded_cost_sum_usd"] is None
     assert summary["cost_halt_status"] == "clear"
+    assert summary["inventory_diagnostics"] == {
+        "schema_version": 1, "status": "unknown", "failure_subtype": "unknown",
+        "pagination_disposition": "unknown", "pages_completed": None,
+        "items_received": None, "last_page_items": None, "pagination_complete": None,
+    }
 
     mismatched = collect_summary(db_path, config_path=config_path, env={
         "BOT_OPERATION_STARTED_AT": started_at, "BOT_WORKFLOW_RUN_ID": "54321",

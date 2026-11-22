@@ -243,6 +243,14 @@ def test_workflow_retains_pr12_guards_and_uses_secret_empty_always_summary():
     assert "METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}" in workflow
     assert "OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}" in workflow
     assert "GITHUB_TOKEN: ${{ github.token }}" in workflow
+    integration_workflow = (ROOT / ".github/workflows/offline-verification.yml").read_text(encoding="utf-8")
+    integration_job = integration_workflow.split("verify-inventory-diagnostics-integration:", 1)[1]
+    fetch_history = 'git fetch --no-tags --depth=1 origin "$HISTORICAL_READINESS_COMMIT"'
+    assert fetch_history in integration_job
+    assert 'HISTORICAL_READINESS_COMMIT: f0a423142e6ccb499ba483fe769b8cfcb8e88b30' in integration_job
+    assert 'HISTORICAL_READINESS_TREE: 6aab6dd6cb39d5feeebf6cf1f47a9e6f07309fd5' in integration_job
+    assert integration_job.index(fetch_history) < integration_job.index("Block new outbound traffic during verification")
+    assert 'tests/fixtures/readiness_release_bundle_manifest.json' in integration_job
 
 
 def test_producer_has_only_allowlisted_imports_and_read_only_sqlite_access():

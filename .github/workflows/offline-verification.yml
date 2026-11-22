@@ -1060,12 +1060,13 @@ jobs:
       EXPECTED_BASE_SHA: ${{ github.event.pull_request.base.sha }}
       ACCEPTED_BASE_SHA: 5ff31100aeb3dfb0be6ce5a2a7dfadb8837d7006
       ACCEPTED_BASE_TREE: 3b568c035718fb63a830ad34a76e0ea6a6dbaa23
+      PUBLISHED_PR18_HEAD: 36738057a5d32916c595fbd92161d0dcc6a5de2e
       ACCEPTED_BASE_WORKFLOW_BLOB: d12c5f9430a59b35221016399958e9d98280f582
       ACCEPTED_API_BLOB: f2a3664d53f823fd78971e9cca9ade7fbff51219
-      ACCEPTED_MAIN_BLOB: 53fa7f594043dea6270e8c266473a259db0de89d
-      ACCEPTED_SUMMARY_BLOB: b8eb231f19d079fcfe4da0476b30c14680cd3ad1
+      ACCEPTED_MAIN_BLOB: 8b07e5e4cd9dd1183cc340ea3a88659a472a803b
+      ACCEPTED_SUMMARY_BLOB: 99d56074ce20c939ffeb8a051645064a9d77e799
       ACCEPTED_INVENTORY_DIAGNOSTICS_BLOB: 3077015d31108886748d97b0b5987aca9436bd34
-      ACCEPTED_TEST_INVENTORY_DIAGNOSTICS_BLOB: 9240834f14c16a9556f412a320b17160ca0e2fbe
+      ACCEPTED_TEST_INVENTORY_DIAGNOSTICS_BLOB: 3b8bfc366dfd3974482dc839badc5658573562d1
       ACCEPTED_UNCHANGED_CORE_BLOB: 1fdbaff3f8e68612c21079391e8be2d1dd2e7309
       ACCEPTED_UNCHANGED_READINESS_BLOB: b7051517115f03b50f6de7344bf31b9e8cc7da5b
       ACCEPTED_UNCHANGED_REQUIREMENTS_BLOB: b801b66111cb4f6374e402575d142994f7f18a79
@@ -1075,6 +1076,8 @@ jobs:
       EXPECTED_BASELINE_TEST_CASES: '294'
       EXPECTED_BASELINE_NODE_ID_SHA256: f9eb354c599a3fd401278fbf4dde5c5e4df3929a0956a374a9df01471df1537d
       EXPECTED_TEST_CASES: '306'
+      HISTORICAL_READINESS_COMMIT: f0a423142e6ccb499ba483fe769b8cfcb8e88b30
+      HISTORICAL_READINESS_TREE: 6aab6dd6cb39d5feeebf6cf1f47a9e6f07309fd5
     steps:
       - name: Check out exact PR head without credential persistence
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -1083,17 +1086,21 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
 
-      - name: Assert exact PR17 base, source blobs, and six-path allowlist
+      - name: Fetch PR18 ancestry and assert exact eight-path correction delta
         shell: bash
         run: |
           set -euo pipefail
           test "$GITHUB_BASE_REF" = "main"
           test "$EXPECTED_BASE_SHA" = "$ACCEPTED_BASE_SHA"
+          git fetch --no-tags --depth=2 origin "$PUBLISHED_PR18_HEAD"
+          test "$(git rev-parse "$PUBLISHED_PR18_HEAD^{commit}")" = "$PUBLISHED_PR18_HEAD"
+          test "$(git rev-parse "$PUBLISHED_PR18_HEAD^")" = "$ACCEPTED_BASE_SHA"
           test "$(git rev-parse "$ACCEPTED_BASE_SHA^{tree}")" = "$ACCEPTED_BASE_TREE"
           test "$(git rev-parse "$ACCEPTED_BASE_SHA:.github/workflows/offline-verification.yml")" = "$ACCEPTED_BASE_WORKFLOW_BLOB"
           actual_head="$(git rev-parse HEAD)"
           test "$actual_head" = "$EXPECTED_HEAD_SHA"
-          test "$(git rev-parse HEAD^)" = "$ACCEPTED_BASE_SHA"
+          test "$(git rev-list --parents -n 1 HEAD | awk '{print NF - 1}')" -eq 1
+          test "$(git rev-parse HEAD^)" = "$PUBLISHED_PR18_HEAD"
           check_blob() {
             expected="$1"
             path="$2"
@@ -1114,7 +1121,10 @@ jobs:
           check_blob "$ACCEPTED_UNCHANGED_CONFIG_BLOB" config.json
           check_blob "$ACCEPTED_UNCHANGED_VERIFIER_BLOB" scripts/verify.py
           check_blob "$ACCEPTED_UNCHANGED_TESTS_CONFTEST_BLOB" tests/conftest.py
-          expected_paths=$'.github/workflows/offline-verification.yml\nfutureeval_bot/__main__.py\nfutureeval_bot/api.py\nfutureeval_bot/inventory_diagnostics.py\nfutureeval_bot/operational_summary.py\ntests/test_inventory_diagnostics.py'
+          expected_correction_paths=$'.github/workflows/offline-verification.yml\nfutureeval_bot/__main__.py\nfutureeval_bot/operational_summary.py\ntests/test_inventory.py\ntests/test_inventory_diagnostics.py\ntests/test_operational_summary_pr15_ci.py\ntests/test_operational_summary_v2.py\ntests/test_pagination_inventory_integration.py'
+          actual_correction_paths="$(git diff --name-only "$PUBLISHED_PR18_HEAD" HEAD | LC_ALL=C sort)"
+          test "$actual_correction_paths" = "$expected_correction_paths"
+          expected_paths=$'.github/workflows/offline-verification.yml\nfutureeval_bot/__main__.py\nfutureeval_bot/api.py\nfutureeval_bot/inventory_diagnostics.py\nfutureeval_bot/operational_summary.py\ntests/test_inventory.py\ntests/test_inventory_diagnostics.py\ntests/test_operational_summary_pr15_ci.py\ntests/test_operational_summary_v2.py\ntests/test_pagination_inventory_integration.py'
           actual_paths="$(git diff --name-only "$ACCEPTED_BASE_SHA" HEAD | LC_ALL=C sort)"
           test "$actual_paths" = "$expected_paths"
           printf 'Exact source base: %s\nBase tree: %s\n' "$ACCEPTED_BASE_SHA" "$ACCEPTED_BASE_TREE" >> "$GITHUB_STEP_SUMMARY"
@@ -1123,6 +1133,32 @@ jobs:
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.12'
+
+      - name: Fetch and verify exact PR10 history for unchanged pin tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "$HISTORICAL_READINESS_COMMIT"
+          test "$(git rev-parse "$HISTORICAL_READINESS_COMMIT^{commit}")" = "$HISTORICAL_READINESS_COMMIT"
+          test "$(git rev-parse "$HISTORICAL_READINESS_COMMIT^{tree}")" = "$HISTORICAL_READINESS_TREE"
+          python - <<'PY'
+          import json
+          import subprocess
+          from pathlib import Path
+
+          commit = "f0a423142e6ccb499ba483fe769b8cfcb8e88b30"
+          tree = "6aab6dd6cb39d5feeebf6cf1f47a9e6f07309fd5"
+          manifest = json.loads(Path("tests/fixtures/readiness_release_bundle_manifest.json").read_text())
+          if manifest.get("base_commit") != commit or manifest.get("base_tree") != tree:
+              raise SystemExit("PR10 historical manifest identity changed")
+          for item in manifest.get("baseline_files", []):
+              actual = subprocess.run(
+                  ["git", "rev-parse", f"{commit}:{item['path']}"],
+                  check=True, capture_output=True, text=True,
+              ).stdout.strip()
+              if actual != item.get("sha"):
+                  raise SystemExit(f"PR10 pinned blob unavailable or mismatched: {item['path']}")
+          PY
 
       - name: Install pinned direct dependencies
         run: python -m pip install --disable-pip-version-check -r requirements.txt

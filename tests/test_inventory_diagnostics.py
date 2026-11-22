@@ -14,11 +14,12 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from futureeval_bot.api import FeedPaginationIncomplete, Metaculus, ServiceError
+import futureeval_bot.__main__ as entry
 from futureeval_bot.inventory_diagnostics import (
     BINDING_KEYS, FAILURE_SUBTYPES, InventoryDiagnostics, UNKNOWN_DIAGNOSTICS,
     collect_inventory, summary_diagnostics, validate_diagnostics,
 )
-from futureeval_bot.operational_summary import collect_summary
+from futureeval_bot.operational_summary import _summary_inventory_diagnostics, collect_summary
 
 
 class FakeState:
@@ -26,12 +27,16 @@ class FakeState:
         self.active_operation_id = None
         self.discovered = []
         self.metadata = {}
+        self.operation_stage = None
 
     def discover(self, contract, config):
         self.discovered.append(contract.question_id)
 
     def set_meta(self, key, value):
         self.metadata[key] = value
+
+    def set_operation_stage(self, stage):
+        self.operation_stage = stage
 
 
 class InventoryDiagnosticsTests(unittest.TestCase):
@@ -85,12 +90,23 @@ class InventoryDiagnosticsTests(unittest.TestCase):
         self.assertEqual(set(binding), BINDING_KEYS)
         record = {"binding": binding, "diagnostics": self.good_complete()}
         self.assertEqual(summary_diagnostics(record, binding, "completed"), self.good_complete())
+        self.assertEqual(_summary_inventory_diagnostics(record, binding, "completed"),
+                         summary_diagnostics(record, binding, "completed"))
         self.assertEqual(summary_diagnostics(record, {**binding, "source_sha": "b" * 40}, "completed"),
                          UNKNOWN_DIAGNOSTICS)
+        self.assertEqual(_summary_inventory_diagnostics(record, {**binding, "source_sha": "b" * 40}, "completed"),
+                         summary_diagnostics(record, {**binding, "source_sha": "b" * 40}, "completed"))
         self.assertEqual(summary_diagnostics(record, binding, "failed"), UNKNOWN_DIAGNOSTICS)
+        self.assertEqual(_summary_inventory_diagnostics(record, binding, "failed"),
+                         summary_diagnostics(record, binding, "failed"))
         self.assertEqual(summary_diagnostics(None, binding, "completed"), UNKNOWN_DIAGNOSTICS)
+        self.assertEqual(_summary_inventory_diagnostics(None, binding, "completed"),
+                         summary_diagnostics(None, binding, "completed"))
         self.assertEqual(summary_diagnostics({"binding": binding, "diagnostics": {
             **self.good_complete(), "pages_completed": 31}}, binding, "completed"), UNKNOWN_DIAGNOSTICS)
+        malformed = {"binding": binding, "diagnostics": {**self.good_complete(), "pages_completed": 31}}
+        self.assertEqual(_summary_inventory_diagnostics(malformed, binding, "completed"),
+                         summary_diagnostics(malformed, binding, "completed"))
 
     def _remote(self, response):
         remote = Metaculus.__new__(Metaculus)
@@ -251,15 +267,30 @@ class InventoryDiagnosticsTests(unittest.TestCase):
 
     def test_rejected_continuation_never_reaches_discovery(self):
         state = FakeState()
+        state.active_operation_id = "repo/123/1"
+        state.db = SimpleNamespace(execute=lambda *args: SimpleNamespace(fetchone=lambda: {
+            "operation_id": "repo/123/1", "repository": "repo",
+            "workflow_path": ".github/workflows/forecast.yml", "workflow_run_id": "123",
+            "workflow_run_attempt": "1", "source_sha": "a" * 40,
+            "config_fingerprint": "0123456789abcdef", "started_at": "2026-11-18T00:00:00Z",
+            "status": "started",
+        }))
         remote = self._remote({"results": [{"question": {"type": "binary"}}]})
-        diagnostic = InventoryDiagnostics(state)
-        with self.assertRaises(FeedPaginationIncomplete):
-            collect_inventory(remote, 33121, state, object(), diagnostic, supported={"binary"},
-                contract_factory=lambda post, project: SimpleNamespace(question_id=1, status="open", open_time=None),
-                is_future=lambda contract: False, service_error=RuntimeError, on_invalid_post=lambda post: None)
+        reached = []
+        model = SimpleNamespace(config=object(), rate_limit_circuit_open=lambda config: reached.append("model"))
+        config = SimpleNamespace(season_project=33121, practice_project=32977)
+        with patch.object(entry, "live_gate", lambda *args: None), \
+             patch.object(entry, "research", lambda *args: reached.append("research")), \
+             patch.object(entry, "prepare", lambda *args: reached.append("forecast")), \
+             patch.object(entry, "reconcile_and_submit", lambda *args, **kwargs: reached.append("submit")):
+            with self.assertRaises(FeedPaginationIncomplete):
+                entry.run(config, state, remote, model)
         self.assertEqual(state.discovered, [])
-        self.assertEqual(diagnostic.progress["status"], "failed")
-        self.assertEqual(diagnostic.progress["failure_subtype"], "continuation_missing")
+        self.assertEqual(reached, [])
+        self.assertEqual(state.operation_stage, "inventory")
+        saved = state.metadata["inventory_diagnostics:repo/123/1"]
+        self.assertEqual(saved["diagnostics"]["status"], "failed")
+        self.assertEqual(saved["diagnostics"]["failure_subtype"], "continuation_missing")
 
     def test_complete_feed_requires_terminal_page_and_successful_discovery(self):
         state = FakeState()

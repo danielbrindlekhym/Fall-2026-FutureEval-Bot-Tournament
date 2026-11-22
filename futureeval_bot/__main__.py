@@ -16,6 +16,7 @@ from .forecast import NoValidatedForecast, prepare
 from .research import research
 from .cloud import configured_cloud
 from .inventory import release_inventory, inventory_counts
+from .inventory_diagnostics import InventoryDiagnostics, collect_inventory
 
 
 def services(config: Config, state: State):
