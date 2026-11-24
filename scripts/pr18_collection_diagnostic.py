@@ -387,15 +387,6 @@ def collection_result():
                 raise
 
         @pytest.hookimpl(wrapper=True, tryfirst=True)
-        def pytest_configure(self, config):
-            try:
-                result = yield
-                return result
-            except BaseException as exc:
-                record_exception(exc, "configuration")
-                raise
-
-        @pytest.hookimpl(wrapper=True, tryfirst=True)
         def pytest_sessionstart(self, session):
             record["pytest_execution_confirmed"] = True
             try:
@@ -446,7 +437,7 @@ def collection_result():
 
     stdout = io.StringIO()
     stderr = io.StringIO()
-    code = 4
+    code = None  # None means pytest.main raised before returning an exit status.
     try:
         with redirect_stdout(stdout), redirect_stderr(stderr):
             code = int(pytest.main(["tests", "--collect-only", "-q"], plugins=[CollectionIdentity(), Observer()]))
@@ -455,7 +446,7 @@ def collection_result():
             record_exception(exc, "pytest_main")
     record["exit_code"] = code
     captured = stdout.getvalue() + "\n" + stderr.getvalue()
-    if code != 0 and record["failure_category"] is None:
+    if code is not None and code != 0 and record["failure_category"] is None:
         if "ConftestImportFailure" in captured or "ImportError while loading conftest" in captured:
             record["failure_category"] = "pytest_import_output"
             record["failure_stage"] = "initial_conftests"
@@ -530,4 +521,4 @@ finally:
     record["ended_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     atomic_json(DIAG_ROOT / "child-result.json", record)
 
-raise SystemExit(exit_code)
+raise SystemExit(exit_code if type(exit_code) is int else 1)
