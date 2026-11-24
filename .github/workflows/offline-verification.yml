@@ -1061,9 +1061,9 @@ jobs:
       ACCEPTED_BASE_SHA: 5ff31100aeb3dfb0be6ce5a2a7dfadb8837d7006
       ACCEPTED_BASE_TREE: 3b568c035718fb63a830ad34a76e0ea6a6dbaa23
       PUBLISHED_PR18_HEAD: 36738057a5d32916c595fbd92161d0dcc6a5de2e
-      CURRENT_PR18_HEAD: 44310d26854f92ac979b1fc674a0c1a42a3f859e
-      CURRENT_PR18_TREE: 8a3e8c53cd69a0c18e36a674f40f3d79f21452a1
-      CURRENT_PR18_WORKFLOW_BLOB: 2756a75a8249c9eab333685b0284b5bbc0d29691
+      CURRENT_PR18_HEAD: f7e84233dfdd87f064175683167b3af2c8929bfb
+      CURRENT_PR18_TREE: bf237e2c4137f9d2d6af40d916e586f03e760efd
+      CURRENT_PR18_WORKFLOW_BLOB: 42b42134bdb74943c551ffdf620085283e536930
       DIAGNOSTIC_HELPER_BLOB: eb6e046ef2860481fa9ac96f18e4e371b98bdfc3
       ACCEPTED_BASE_WORKFLOW_BLOB: d12c5f9430a59b35221016399958e9d98280f582
       ACCEPTED_API_BLOB: f2a3664d53f823fd78971e9cca9ade7fbff51219
@@ -1090,7 +1090,7 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
 
-      - name: Fetch PR18 ancestry and assert exact eight-path correction delta
+      - name: Fetch PR18 ancestry and assert workflow-only follow-up plus cumulative correction
         shell: bash
         run: |
           set -euo pipefail
@@ -1105,12 +1105,13 @@ jobs:
           test "$(git rev-parse "$CURRENT_PR18_HEAD^{commit}")" = "$CURRENT_PR18_HEAD"
           test "$(git rev-parse "$CURRENT_PR18_HEAD^{tree}")" = "$CURRENT_PR18_TREE"
           test "$(git rev-parse "$CURRENT_PR18_HEAD:.github/workflows/offline-verification.yml")" = "$CURRENT_PR18_WORKFLOW_BLOB"
+          test "$(git rev-parse "$CURRENT_PR18_HEAD:scripts/pr18_collection_diagnostic.py")" = "$DIAGNOSTIC_HELPER_BLOB"
           actual_head="$(git rev-parse HEAD)"
           test "$actual_head" = "$EXPECTED_HEAD_SHA"
           test "$(git rev-list --parents -n 1 HEAD | awk '{print NF - 1}')" -eq 1
           test "$(git rev-parse HEAD^)" = "$CURRENT_PR18_HEAD"
           changed_followup_paths="$(git diff-tree --no-commit-id --name-only -r HEAD^ HEAD | LC_ALL=C sort)"
-          expected_followup_paths=$'.github/workflows/offline-verification.yml\nscripts/pr18_collection_diagnostic.py'
+          expected_followup_paths=$'.github/workflows/offline-verification.yml'
           test "$changed_followup_paths" = "$expected_followup_paths"
           check_blob() {
             expected="$1"
