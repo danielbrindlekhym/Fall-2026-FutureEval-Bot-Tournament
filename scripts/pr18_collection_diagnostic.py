@@ -10,6 +10,7 @@ import os
 import pathlib
 import re
 import runpy
+import shlex
 import socket
 import subprocess
 import sys
@@ -70,6 +71,73 @@ def safe_top_level_module(value):
 def named_rule(lines, marker, required):
     matches = [line for line in lines if marker in line]
     return len(matches) == 1 and all(piece in matches[0] for piece in required)
+
+
+def exact_comment_rule_tokens(lines, marker):
+    matches = []
+    for line in lines:
+        try:
+            tokens = shlex.split(line, comments=False, posix=True)
+        except (TypeError, ValueError):
+            return None
+        if not tokens or tokens[0] != "-A":
+            continue
+        comments = []
+        index = 0
+        while index < len(tokens):
+            if tokens[index] == "--comment":
+                if index + 1 >= len(tokens):
+                    return None
+                comments.append(tokens[index + 1])
+                index += 2
+            else:
+                index += 1
+        if marker in comments:
+            matches.append(tokens)
+    return matches
+
+
+def established_rule_matches(lines, marker):
+    matches = exact_comment_rule_tokens(lines, marker)
+    if matches is None or len(matches) != 1:
+        return False
+    tokens = matches[0]
+    if "!" in tokens or tokens.count("-A") != 1 or tokens[:2] != ["-A", "OUTPUT"]:
+        return False
+
+    modules = []
+    comments = []
+    states = []
+    jumps = []
+    index = 2
+    while index < len(tokens):
+        option = tokens[index]
+        if option not in ("-m", "--comment", "--ctstate", "-j", "--jump"):
+            return False
+        if index + 1 >= len(tokens):
+            return False
+        value = tokens[index + 1]
+        if option == "-m":
+            modules.append(value)
+        elif option == "--comment":
+            comments.append(value)
+        elif option == "--ctstate":
+            states.append(value)
+        else:
+            jumps.append(value)
+        index += 2
+
+    if modules.count("conntrack") != 1 or modules.count("comment") != 1 or len(modules) != 2:
+        return False
+    if comments != [marker] or len(states) != 1 or len(jumps) != 1 or jumps[0] != "ACCEPT":
+        return False
+    state_items = states[0].split(",")
+    return (
+        len(state_items) == 2
+        and all(state_items)
+        and len(set(state_items)) == 2
+        and set(state_items) == {"ESTABLISHED", "RELATED"}
+    )
 
 
 def empty_firewall_diagnostics():
@@ -217,9 +285,16 @@ def preflight():
                 continue
             lines = saved.stdout.splitlines()
             for marker_name, (check_name, marker, required) in specs.items():
-                matching = [line for line in lines if marker in line]
-                diagnostic["marker_counts_capped_at_2"][marker_name] = min(len(matching), 2)
-                checks[check_name] = len(matching) == 1 and all(piece in matching[0] for piece in required)
+                if marker_name == "established":
+                    matching = exact_comment_rule_tokens(lines, marker)
+                    diagnostic["marker_counts_capped_at_2"][marker_name] = (
+                        None if matching is None else min(len(matching), 2)
+                    )
+                    checks[check_name] = established_rule_matches(lines, marker)
+                else:
+                    matching = [line for line in lines if marker in line]
+                    diagnostic["marker_counts_capped_at_2"][marker_name] = min(len(matching), 2)
+                    checks[check_name] = len(matching) == 1 and all(piece in matching[0] for piece in required)
         except BaseException:
             diagnostic["result"] = "launch_error"
 
