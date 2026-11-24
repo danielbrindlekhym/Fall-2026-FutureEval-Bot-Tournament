@@ -1061,10 +1061,10 @@ jobs:
       ACCEPTED_BASE_SHA: 5ff31100aeb3dfb0be6ce5a2a7dfadb8837d7006
       ACCEPTED_BASE_TREE: 3b568c035718fb63a830ad34a76e0ea6a6dbaa23
       PUBLISHED_PR18_HEAD: 36738057a5d32916c595fbd92161d0dcc6a5de2e
-      CURRENT_PR18_HEAD: 4ce472d9aee84339aa292d55be405560ff0c42b5
-      CURRENT_PR18_TREE: 15e3a62fb42fe722d7535374c1760c1a6f39dc5f
-      CURRENT_PR18_WORKFLOW_BLOB: 7c0b462c77ddf403be05e3045d577acf670d50e9
-      DIAGNOSTIC_HELPER_BLOB: 994e106cbf02d9b06f7da610b6c62db6159c0415
+      CURRENT_PR18_HEAD: 44310d26854f92ac979b1fc674a0c1a42a3f859e
+      CURRENT_PR18_TREE: 8a3e8c53cd69a0c18e36a674f40f3d79f21452a1
+      CURRENT_PR18_WORKFLOW_BLOB: 2756a75a8249c9eab333685b0284b5bbc0d29691
+      DIAGNOSTIC_HELPER_BLOB: f9d47fd72de882a0161dffa551329d2277d58560
       ACCEPTED_BASE_WORKFLOW_BLOB: d12c5f9430a59b35221016399958e9d98280f582
       ACCEPTED_API_BLOB: f2a3664d53f823fd78971e9cca9ade7fbff51219
       ACCEPTED_MAIN_BLOB: 8b07e5e4cd9dd1183cc340ea3a88659a472a803b
@@ -1268,6 +1268,17 @@ jobs:
               "test_bodies_run": False,
               "raw_output_retained": False,
               "preflight": {},
+              "firewall_diagnostics": {
+                  "rule_save": {
+                      family: {"result": "not_run", "exit_code": None,
+                               "marker_counts_capped_at_2": {marker: None for marker in ("loopback", "established", "blocked_new")}}
+                      for family in ("ipv4", "ipv6")
+                  },
+                  "probes": {
+                      name: {"result": "not_run", "errno": "none"}
+                      for name in ("loopback", "new_outbound_ipv4")
+                  },
+              },
               "collection": {
                   "pytest_execution_confirmed": False,
                   "collection_hook_reached": False,
@@ -1298,6 +1309,36 @@ jobs:
                       key: value for key, value in child.get("preflight", {}).items()
                       if isinstance(key, str) and type(value) is bool
                   } if isinstance(child.get("preflight"), dict) else {}
+                  firewall = child.get("firewall_diagnostics")
+                  if isinstance(firewall, dict):
+                      rules = firewall.get("rule_save") if isinstance(firewall.get("rule_save"), dict) else {}
+                      probes = firewall.get("probes") if isinstance(firewall.get("probes"), dict) else {}
+                      rule_results = {"not_run", "success", "nonzero_exit", "launch_error", "invalid_exit", "invalid_output"}
+                      probe_results = {"not_run", "allowed", "blocked", "reachable", "unexpected_error", "probe_error"}
+                      errno_categories = {"none", "connection_refused", "host_unreachable", "network_unreachable", "permission_denied", "timed_out", "other"}
+                      result["firewall_diagnostics"] = {
+                          "rule_save": {
+                              family: {
+                                  "result": rules.get(family, {}).get("result") if isinstance(rules.get(family), dict) and rules[family].get("result") in rule_results else "unknown",
+                                  "exit_code": rules.get(family, {}).get("exit_code") if isinstance(rules.get(family), dict) and type(rules[family].get("exit_code")) is int and 0 <= rules[family]["exit_code"] <= 255 else None,
+                                  "marker_counts_capped_at_2": {
+                                      marker: rules.get(family, {}).get("marker_counts_capped_at_2", {}).get(marker)
+                                      if isinstance(rules.get(family), dict) and isinstance(rules[family].get("marker_counts_capped_at_2"), dict)
+                                      and type(rules[family]["marker_counts_capped_at_2"].get(marker)) is int and rules[family]["marker_counts_capped_at_2"][marker] in (0, 1, 2)
+                                      else None
+                                      for marker in ("loopback", "established", "blocked_new")
+                                  },
+                              }
+                              for family in ("ipv4", "ipv6")
+                          },
+                          "probes": {
+                              name: {
+                                  "result": probes.get(name, {}).get("result") if isinstance(probes.get(name), dict) and probes[name].get("result") in probe_results else "unknown",
+                                  "errno": probes.get(name, {}).get("errno") if isinstance(probes.get(name), dict) and probes[name].get("errno") in errno_categories else "other",
+                              }
+                              for name in ("loopback", "new_outbound_ipv4")
+                          },
+                      }
                   c = child.get("collection") if isinstance(child.get("collection"), dict) else {}
                   allowed_checks = {
                       "baseline_count", "baseline_digest", "new_id_set", "total_count",

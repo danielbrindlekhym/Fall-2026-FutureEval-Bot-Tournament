@@ -72,6 +72,36 @@ def named_rule(lines, marker, required):
     return len(matches) == 1 and all(piece in matches[0] for piece in required)
 
 
+def empty_firewall_diagnostics():
+    markers = ("loopback", "established", "blocked_new")
+    return {
+        "rule_save": {
+            family: {
+                "result": "not_run",
+                "exit_code": None,
+                "marker_counts_capped_at_2": {marker: None for marker in markers},
+            }
+            for family in ("ipv4", "ipv6")
+        },
+        "probes": {
+            name: {"result": "not_run", "errno": "none"}
+            for name in ("loopback", "new_outbound_ipv4")
+        },
+    }
+
+
+def safe_errno_category(value):
+    categories = {
+        errno.ECONNREFUSED: "connection_refused",
+        errno.EHOSTUNREACH: "host_unreachable",
+        errno.ENETUNREACH: "network_unreachable",
+        errno.EACCES: "permission_denied",
+        errno.EPERM: "permission_denied",
+        errno.ETIMEDOUT: "timed_out",
+    }
+    return categories.get(value, "other") if type(value) is int else "none"
+
+
 def test_loopback_socket():
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
@@ -83,9 +113,11 @@ def test_loopback_socket():
                 client.connect(server.getsockname())
                 accepted, _ = server.accept()
                 accepted.close()
-        return True
-    except OSError:
-        return False
+        return True, "allowed", "none"
+    except OSError as exc:
+        return False, "probe_error", safe_errno_category(exc.errno)
+    except BaseException:
+        return False, "probe_error", "other"
 
 
 def test_new_outbound_socket_is_blocked():
@@ -99,13 +131,21 @@ def test_new_outbound_socket_is_blocked():
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
             probe.settimeout(1)
-            return probe.connect_ex(("198.51.100.1", 443)) in allowed_rejections
+            code = probe.connect_ex(("198.51.100.1", 443))
+            if code in allowed_rejections:
+                return True, "blocked", safe_errno_category(code)
+            if code == 0:
+                return False, "reachable", "none"
+            return False, "unexpected_error", safe_errno_category(code)
     except OSError as exc:
-        return exc.errno in allowed_rejections
+        return False, "probe_error", safe_errno_category(exc.errno)
+    except BaseException:
+        return False, "probe_error", "other"
 
 
 def preflight():
     checks = {}
+    firewall_diagnostics = empty_firewall_diagnostics()
     tmp = pathlib.Path(os.environ["TMPDIR"]).resolve()
     checks["cwd_is_checkout_root"] = (
         (ROOT / "tests" / "conftest.py").is_file()
@@ -148,31 +188,55 @@ def preflight():
     except BaseException:
         checks["conftest_import"] = False
 
-    try:
-        v4 = subprocess.run(["sudo", "iptables-save", "-t", "filter"], capture_output=True, text=True)
-        v6 = subprocess.run(["sudo", "ip6tables-save", "-t", "filter"], capture_output=True, text=True)
-        v4_lines = v4.stdout.splitlines() if v4.returncode == 0 else []
-        v6_lines = v6.stdout.splitlines() if v6.returncode == 0 else []
-        checks["loopback_rule_v4"] = named_rule(v4_lines, TAG + "-v4-lo", ["-o lo", "-j ACCEPT"])
-        checks["loopback_rule_v6"] = named_rule(v6_lines, TAG + "-v6-lo", ["-o lo", "-j ACCEPT"])
-        checks["established_rule_v4"] = named_rule(
-            v4_lines, TAG + "-v4-established", ["--ctstate ESTABLISHED,RELATED", "-j ACCEPT"]
-        )
-        checks["established_rule_v6"] = named_rule(
-            v6_lines, TAG + "-v6-established", ["--ctstate ESTABLISHED,RELATED", "-j ACCEPT"]
-        )
-        checks["blocked_new_socket_rule_v4"] = named_rule(v4_lines, TAG + "-v4-reject", ["-j REJECT"])
-        checks["blocked_new_socket_rule_v6"] = named_rule(v6_lines, TAG + "-v6-reject", ["-j REJECT"])
-        checks["loopback_socket_allowed"] = test_loopback_socket()
-        checks["blocked_new_socket_probe_v4"] = test_new_outbound_socket()
-    except BaseException:
-        for key in (
-            "loopback_rule_v4", "loopback_rule_v6", "established_rule_v4", "established_rule_v6",
-            "blocked_new_socket_rule_v4", "blocked_new_socket_rule_v6", "loopback_socket_allowed",
-            "blocked_new_socket_probe_v4",
-        ):
-            checks[key] = False
-    return checks
+    rule_specs = {
+        "ipv4": ("iptables-save", {
+            "loopback": ("loopback_rule_v4", TAG + "-v4-lo", ["-o lo", "-j ACCEPT"]),
+            "established": ("established_rule_v4", TAG + "-v4-established", ["--ctstate ESTABLISHED,RELATED", "-j ACCEPT"]),
+            "blocked_new": ("blocked_new_socket_rule_v4", TAG + "-v4-reject", ["-j REJECT"]),
+        }),
+        "ipv6": ("ip6tables-save", {
+            "loopback": ("loopback_rule_v6", TAG + "-v6-lo", ["-o lo", "-j ACCEPT"]),
+            "established": ("established_rule_v6", TAG + "-v6-established", ["--ctstate ESTABLISHED,RELATED", "-j ACCEPT"]),
+            "blocked_new": ("blocked_new_socket_rule_v6", TAG + "-v6-reject", ["-j REJECT"]),
+        }),
+    }
+    for family, (tool, specs) in rule_specs.items():
+        diagnostic = firewall_diagnostics["rule_save"][family]
+        try:
+            saved = subprocess.run(["sudo", tool, "-t", "filter"], capture_output=True, text=True)
+            code = saved.returncode
+            if type(code) is not int or not 0 <= code <= 255:
+                diagnostic["result"] = "invalid_exit"
+                continue
+            diagnostic["exit_code"] = code
+            diagnostic["result"] = "success" if code == 0 else "nonzero_exit"
+            if code != 0:
+                continue
+            if not isinstance(saved.stdout, str):
+                diagnostic["result"] = "invalid_output"
+                continue
+            lines = saved.stdout.splitlines()
+            for marker_name, (check_name, marker, required) in specs.items():
+                matching = [line for line in lines if marker in line]
+                diagnostic["marker_counts_capped_at_2"][marker_name] = min(len(matching), 2)
+                checks[check_name] = len(matching) == 1 and all(piece in matching[0] for piece in required)
+        except BaseException:
+            diagnostic["result"] = "launch_error"
+
+    checks.setdefault("loopback_rule_v4", False)
+    checks.setdefault("loopback_rule_v6", False)
+    checks.setdefault("established_rule_v4", False)
+    checks.setdefault("established_rule_v6", False)
+    checks.setdefault("blocked_new_socket_rule_v4", False)
+    checks.setdefault("blocked_new_socket_rule_v6", False)
+
+    loopback_ok, loopback_result, loopback_errno = test_loopback_socket()
+    checks["loopback_socket_allowed"] = loopback_ok
+    firewall_diagnostics["probes"]["loopback"] = {"result": loopback_result, "errno": loopback_errno}
+    outbound_ok, outbound_result, outbound_errno = test_new_outbound_socket_is_blocked()
+    checks["blocked_new_socket_probe_v4"] = outbound_ok
+    firewall_diagnostics["probes"]["new_outbound_ipv4"] = {"result": outbound_result, "errno": outbound_errno}
+    return checks, firewall_diagnostics
 
 
 def collection_result():
@@ -343,12 +407,13 @@ record = {
     "collection_only": True,
     "test_bodies_run": False,
     "preflight": {},
+    "firewall_diagnostics": empty_firewall_diagnostics(),
     "collection": {},
     "status": "started",
 }
 atomic_json(DIAG_ROOT / "started-child.json", record)
 try:
-    record["preflight"] = preflight()
+    record["preflight"], record["firewall_diagnostics"] = preflight()
     if not all(record["preflight"].values()):
         record["status"] = "preflight_failed"
         record["collection"] = {
