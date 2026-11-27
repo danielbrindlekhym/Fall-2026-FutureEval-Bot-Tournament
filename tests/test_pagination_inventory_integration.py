@@ -71,7 +71,7 @@ def test_imported_metaculus_and_inventory_integrate_on_contiguous_pages():
     assert counts["complete_official_released_inventory"] is False
 
 
-def test_missing_next_after_accumulated_page_raises_typed_incomplete():
+def test_missing_next_after_accumulated_page_stays_incomplete_downstream():
     client, calls, error = collect([
         {"results": [question_post(1)], "next": next_page(1)},
         {"results": [question_post(2)]},
@@ -86,7 +86,7 @@ def test_missing_next_after_accumulated_page_raises_typed_incomplete():
 
 
 @pytest.mark.parametrize("indicator", [False, "", 0, [], {}], ids=["false", "empty", "zero", "list", "object"])
-def test_invalid_non_null_next_after_accumulated_page_raises_typed_incomplete(indicator):
+def test_invalid_non_null_next_after_accumulated_page_stays_incomplete(indicator):
     client, calls, error = collect([
         {"results": [question_post(1)], "next": next_page(1)},
         {"results": [question_post(2)], "next": indicator},
@@ -99,7 +99,7 @@ def test_invalid_non_null_next_after_accumulated_page_raises_typed_incomplete(in
     assert [call["offset"] for call in calls] == [0, 1]
 
 
-def test_server_offset_gap_raises_typed_incomplete_before_inventory():
+def test_server_offset_gap_remains_incomplete_even_with_terminal_null():
     client, calls, error = collect([
         {"results": [question_post(1)], "next": next_page(50)},
         {"results": [question_post(2)], "next": None},

@@ -126,7 +126,7 @@ def test_existing_page_requests_and_return_values_are_unchanged():
     assert remote.feed_pages == [{'offset':0,'count':1,'has_next':True},{'offset':1,'count':1,'has_next':False}]
 
 
-def test_empty_terminal_page_is_valid_but_missing_next_is_incomplete():
+def test_existing_empty_page_policy_is_preserved_and_exposed():
     remote = Metaculus.__new__(Metaculus)
     remote.request = lambda *args, **kwargs: {'results':[],'next':None}
     assert remote.posts(33121) == []

@@ -1061,10 +1061,14 @@ jobs:
       ACCEPTED_BASE_SHA: 5ff31100aeb3dfb0be6ce5a2a7dfadb8837d7006
       ACCEPTED_BASE_TREE: 3b568c035718fb63a830ad34a76e0ea6a6dbaa23
       PUBLISHED_PR18_HEAD: 36738057a5d32916c595fbd92161d0dcc6a5de2e
-      CURRENT_PR18_HEAD: 2c23cb50abf1625363976f95c0ee07f05a8fcc28
-      CURRENT_PR18_TREE: b104b7129e56ab33a5c0b0bff10409a67b58bbfc
-      CURRENT_PR18_WORKFLOW_BLOB: 8a31b503cb666073ed3f8f287f030c685289c697
+      CURRENT_PR18_HEAD: 3c581bde4abf359f3db84bcafc8dff377390bafc
+      CURRENT_PR18_TREE: e47a1de1847d6e621213fb47bb7835746849aabe
+      CURRENT_PR18_WORKFLOW_BLOB: 4972aa0c24d9aa23273f99ee3d6805abf48f5edb
       CURRENT_PR18_HELPER_BLOB: 75eb4e01e6ce11ca6d5dcd794ac4cfdeee5c4acb
+      CURRENT_PR18_TEST_INVENTORY_BLOB: 07efe6aa7cb8df73a617bfdb13202126aa394fac
+      CURRENT_PR18_PAGINATION_INTEGRATION_BLOB: 323f8560693623eadbca7c9d4e9aae29cfc538c6
+      EXPECTED_TEST_INVENTORY_BLOB: 465a944d02c2ed96b8917a9604255cd74dbd25cb
+      EXPECTED_PAGINATION_INTEGRATION_BLOB: dbe92a832935fa79360d77dfd457f1768d4e822a
       DIAGNOSTIC_HELPER_BLOB: 75eb4e01e6ce11ca6d5dcd794ac4cfdeee5c4acb
       ACCEPTED_BASE_WORKFLOW_BLOB: d12c5f9430a59b35221016399958e9d98280f582
       ACCEPTED_API_BLOB: f2a3664d53f823fd78971e9cca9ade7fbff51219
@@ -1108,12 +1112,14 @@ jobs:
           test "$(git rev-parse "$CURRENT_PR18_HEAD:.github/workflows/offline-verification.yml")" = "$CURRENT_PR18_WORKFLOW_BLOB"
           test "$(git rev-parse "$CURRENT_PR18_HEAD:scripts/pr18_collection_diagnostic.py")" = "$CURRENT_PR18_HELPER_BLOB"
           test "$(git rev-parse "$CURRENT_PR18_HEAD:scripts/pr18_collection_diagnostic.py")" = "$DIAGNOSTIC_HELPER_BLOB"
+          test "$(git rev-parse "$CURRENT_PR18_HEAD:tests/test_inventory.py")" = "$CURRENT_PR18_TEST_INVENTORY_BLOB"
+          test "$(git rev-parse "$CURRENT_PR18_HEAD:tests/test_pagination_inventory_integration.py")" = "$CURRENT_PR18_PAGINATION_INTEGRATION_BLOB"
           actual_head="$(git rev-parse HEAD)"
           test "$actual_head" = "$EXPECTED_HEAD_SHA"
           test "$(git rev-list --parents -n 1 HEAD | awk '{print NF - 1}')" -eq 1
           test "$(git rev-parse HEAD^)" = "$CURRENT_PR18_HEAD"
           changed_followup_paths="$(git diff-tree --no-commit-id --name-only -r HEAD^ HEAD | LC_ALL=C sort)"
-          expected_followup_paths=$'.github/workflows/offline-verification.yml'
+          expected_followup_paths=$'.github/workflows/offline-verification.yml\ntests/test_inventory.py\ntests/test_pagination_inventory_integration.py'
           test "$changed_followup_paths" = "$expected_followup_paths"
           check_blob() {
             expected="$1"
@@ -1135,6 +1141,8 @@ jobs:
           check_blob "$ACCEPTED_UNCHANGED_CONFIG_BLOB" config.json
           check_blob "$ACCEPTED_UNCHANGED_VERIFIER_BLOB" scripts/verify.py
           check_blob "$ACCEPTED_UNCHANGED_TESTS_CONFTEST_BLOB" tests/conftest.py
+          check_blob "$EXPECTED_TEST_INVENTORY_BLOB" tests/test_inventory.py
+          check_blob "$EXPECTED_PAGINATION_INTEGRATION_BLOB" tests/test_pagination_inventory_integration.py
           check_blob "$DIAGNOSTIC_HELPER_BLOB" scripts/pr18_collection_diagnostic.py
           expected_correction_paths=$'.github/workflows/offline-verification.yml\nfutureeval_bot/__main__.py\nfutureeval_bot/operational_summary.py\nscripts/pr18_collection_diagnostic.py\ntests/test_inventory.py\ntests/test_inventory_diagnostics.py\ntests/test_operational_summary_pr15_ci.py\ntests/test_operational_summary_v2.py\ntests/test_pagination_inventory_integration.py'
           actual_correction_paths="$(git diff --name-only "$PUBLISHED_PR18_HEAD" HEAD | LC_ALL=C sort)"
