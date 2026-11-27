@@ -4,7 +4,7 @@ from urllib.parse import urlencode
 
 import pytest
 
-from futureeval_bot.api import Metaculus
+from futureeval_bot.api import FeedPaginationIncomplete, Metaculus
 from futureeval_bot.inventory import inventory_counts, release_inventory
 
 
@@ -47,7 +47,10 @@ def collect(pages: list[dict], *, statuses: list[str] | None = None):
         return pages.pop(0)
 
     client.request = fake_request
-    posts = Metaculus.posts(client, 33121, statuses=statuses)
+    try:
+        posts = Metaculus.posts(client, 33121, statuses=statuses)
+    except FeedPaginationIncomplete as error:
+        return client, calls, error
     return client, calls, posts
 
 
@@ -69,38 +72,41 @@ def test_imported_metaculus_and_inventory_integrate_on_contiguous_pages():
 
 
 def test_missing_next_after_accumulated_page_stays_incomplete_downstream():
-    client, calls, posts = collect([
+    client, calls, error = collect([
         {"results": [question_post(1)], "next": next_page(1)},
         {"results": [question_post(2)]},
     ])
 
-    inventory = release_inventory(posts, client.feed_pages, CHECKED_AT)
+    assert isinstance(error, FeedPaginationIncomplete)
+    assert error.failure_subtype == "continuation_missing"
+    assert error.pagination_disposition == "continuation_rejected"
+    assert (error.pages_completed, error.items_received, error.last_page_items) == (2, 2, 1)
     assert [call["offset"] for call in calls] == [0, 1]
     assert [page["has_next"] for page in client.feed_pages] == [True, True]
-    assert inventory["visible_question_ids"] == [1, 2]
-    assert inventory_counts(inventory)["pagination_complete"] is False
 
 
 @pytest.mark.parametrize("indicator", [False, "", 0, [], {}], ids=["false", "empty", "zero", "list", "object"])
 def test_invalid_non_null_next_after_accumulated_page_stays_incomplete(indicator):
-    client, calls, posts = collect([
+    client, calls, error = collect([
         {"results": [question_post(1)], "next": next_page(1)},
         {"results": [question_post(2)], "next": indicator},
     ])
 
-    inventory = release_inventory(posts, client.feed_pages, CHECKED_AT)
+    assert isinstance(error, FeedPaginationIncomplete)
+    assert error.failure_subtype == "continuation_missing"
+    assert error.pagination_disposition == "continuation_rejected"
+    assert (error.pages_completed, error.items_received, error.last_page_items) == (2, 2, 1)
     assert [call["offset"] for call in calls] == [0, 1]
-    assert inventory["pagination_complete"] is False
-    assert inventory_counts(inventory)["currently_visible_questions"] == 2
 
 
 def test_server_offset_gap_remains_incomplete_even_with_terminal_null():
-    client, calls, posts = collect([
+    client, calls, error = collect([
         {"results": [question_post(1)], "next": next_page(50)},
         {"results": [question_post(2)], "next": None},
     ])
 
-    inventory = release_inventory(posts, client.feed_pages, CHECKED_AT)
-    assert [call["offset"] for call in calls] == [0, 50]
-    assert inventory["pagination_complete"] is False
-    assert inventory["visible_question_ids"] == [1, 2]
+    assert isinstance(error, FeedPaginationIncomplete)
+    assert error.failure_subtype == "continuation_offset_invalid"
+    assert error.pagination_disposition == "continuation_rejected"
+    assert (error.pages_completed, error.items_received, error.last_page_items) == (1, 1, 1)
+    assert [call["offset"] for call in calls] == [0]

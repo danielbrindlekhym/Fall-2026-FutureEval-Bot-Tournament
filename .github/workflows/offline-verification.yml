@@ -1046,3 +1046,446 @@ jobs:
           remove_owned_rule ip6tables "${tag}-v6-lo" -o lo -m comment --comment "${tag}-v6-lo" -j ACCEPT
           remove_owned_rule ip6tables "${tag}-v6-established" -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment "${tag}-v6-established" -j ACCEPT
           remove_owned_rule ip6tables "${tag}-v6-reject" -m comment --comment "${tag}-v6-reject" -j REJECT
+
+  verify-inventory-diagnostics-integration:
+    if: github.event_name == 'pull_request' && github.event.pull_request.number == 18 && github.head_ref == 'codex/inventory-diagnostics-integration-v1' && github.base_ref == 'main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    env:
+      LITELLM_LOCAL_MODEL_COST_MAP: 'True'
+      PYTHONUTF8: '1'
+      EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      EXPECTED_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      ACCEPTED_BASE_SHA: 5ff31100aeb3dfb0be6ce5a2a7dfadb8837d7006
+      ACCEPTED_BASE_TREE: 3b568c035718fb63a830ad34a76e0ea6a6dbaa23
+      PUBLISHED_PR18_HEAD: 36738057a5d32916c595fbd92161d0dcc6a5de2e
+      CURRENT_PR18_HEAD: 3c581bde4abf359f3db84bcafc8dff377390bafc
+      CURRENT_PR18_TREE: e47a1de1847d6e621213fb47bb7835746849aabe
+      CURRENT_PR18_WORKFLOW_BLOB: 4972aa0c24d9aa23273f99ee3d6805abf48f5edb
+      CURRENT_PR18_HELPER_BLOB: 75eb4e01e6ce11ca6d5dcd794ac4cfdeee5c4acb
+      CURRENT_PR18_TEST_INVENTORY_BLOB: 07efe6aa7cb8df73a617bfdb13202126aa394fac
+      CURRENT_PR18_PAGINATION_INTEGRATION_BLOB: 323f8560693623eadbca7c9d4e9aae29cfc538c6
+      EXPECTED_TEST_INVENTORY_BLOB: 465a944d02c2ed96b8917a9604255cd74dbd25cb
+      EXPECTED_PAGINATION_INTEGRATION_BLOB: dbe92a832935fa79360d77dfd457f1768d4e822a
+      DIAGNOSTIC_HELPER_BLOB: 75eb4e01e6ce11ca6d5dcd794ac4cfdeee5c4acb
+      ACCEPTED_BASE_WORKFLOW_BLOB: d12c5f9430a59b35221016399958e9d98280f582
+      ACCEPTED_API_BLOB: f2a3664d53f823fd78971e9cca9ade7fbff51219
+      ACCEPTED_MAIN_BLOB: 8b07e5e4cd9dd1183cc340ea3a88659a472a803b
+      ACCEPTED_SUMMARY_BLOB: 99d56074ce20c939ffeb8a051645064a9d77e799
+      ACCEPTED_INVENTORY_DIAGNOSTICS_BLOB: 3077015d31108886748d97b0b5987aca9436bd34
+      ACCEPTED_TEST_INVENTORY_DIAGNOSTICS_BLOB: 3b8bfc366dfd3974482dc839badc5658573562d1
+      ACCEPTED_UNCHANGED_CORE_BLOB: 1fdbaff3f8e68612c21079391e8be2d1dd2e7309
+      ACCEPTED_UNCHANGED_READINESS_BLOB: b7051517115f03b50f6de7344bf31b9e8cc7da5b
+      ACCEPTED_UNCHANGED_REQUIREMENTS_BLOB: b801b66111cb4f6374e402575d142994f7f18a79
+      ACCEPTED_UNCHANGED_CONFIG_BLOB: e2c4e8f990e74f816dd230e486eb229c5304acaa
+      ACCEPTED_UNCHANGED_VERIFIER_BLOB: 6e13805047ca875879051a4d552380a787e03847
+      ACCEPTED_UNCHANGED_TESTS_CONFTEST_BLOB: 984b1179eff6b01dd8e890004472de684f72e408
+      EXPECTED_BASELINE_TEST_CASES: '294'
+      EXPECTED_BASELINE_NODE_ID_SHA256: f9eb354c599a3fd401278fbf4dde5c5e4df3929a0956a374a9df01471df1537d
+      EXPECTED_TEST_CASES: '306'
+      HISTORICAL_READINESS_COMMIT: f0a423142e6ccb499ba483fe769b8cfcb8e88b30
+      HISTORICAL_READINESS_TREE: 6aab6dd6cb39d5feeebf6cf1f47a9e6f07309fd5
+    steps:
+      - name: Check out exact PR head without credential persistence
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Fetch PR18 ancestry and assert exact helper and workflow correction delta
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_BASE_REF" = "main"
+          test "$EXPECTED_BASE_SHA" = "$ACCEPTED_BASE_SHA"
+          git fetch --no-tags --depth=2 origin "$PUBLISHED_PR18_HEAD"
+          test "$(git rev-parse "$PUBLISHED_PR18_HEAD^{commit}")" = "$PUBLISHED_PR18_HEAD"
+          test "$(git rev-parse "$PUBLISHED_PR18_HEAD^")" = "$ACCEPTED_BASE_SHA"
+          test "$(git rev-parse "$ACCEPTED_BASE_SHA^{tree}")" = "$ACCEPTED_BASE_TREE"
+          test "$(git rev-parse "$ACCEPTED_BASE_SHA:.github/workflows/offline-verification.yml")" = "$ACCEPTED_BASE_WORKFLOW_BLOB"
+          git fetch --no-tags --depth=2 origin "$CURRENT_PR18_HEAD"
+          test "$(git rev-parse "$CURRENT_PR18_HEAD^{commit}")" = "$CURRENT_PR18_HEAD"
+          test "$(git rev-parse "$CURRENT_PR18_HEAD^{tree}")" = "$CURRENT_PR18_TREE"
+          test "$(git rev-parse "$CURRENT_PR18_HEAD:.github/workflows/offline-verification.yml")" = "$CURRENT_PR18_WORKFLOW_BLOB"
+          test "$(git rev-parse "$CURRENT_PR18_HEAD:scripts/pr18_collection_diagnostic.py")" = "$CURRENT_PR18_HELPER_BLOB"
+          test "$(git rev-parse "$CURRENT_PR18_HEAD:scripts/pr18_collection_diagnostic.py")" = "$DIAGNOSTIC_HELPER_BLOB"
+          test "$(git rev-parse "$CURRENT_PR18_HEAD:tests/test_inventory.py")" = "$CURRENT_PR18_TEST_INVENTORY_BLOB"
+          test "$(git rev-parse "$CURRENT_PR18_HEAD:tests/test_pagination_inventory_integration.py")" = "$CURRENT_PR18_PAGINATION_INTEGRATION_BLOB"
+          actual_head="$(git rev-parse HEAD)"
+          test "$actual_head" = "$EXPECTED_HEAD_SHA"
+          test "$(git rev-list --parents -n 1 HEAD | awk '{print NF - 1}')" -eq 1
+          test "$(git rev-parse HEAD^)" = "$CURRENT_PR18_HEAD"
+          changed_followup_paths="$(git diff-tree --no-commit-id --name-only -r HEAD^ HEAD | LC_ALL=C sort)"
+          expected_followup_paths=$'.github/workflows/offline-verification.yml\ntests/test_inventory.py\ntests/test_pagination_inventory_integration.py'
+          test "$changed_followup_paths" = "$expected_followup_paths"
+          check_blob() {
+            expected="$1"
+            path="$2"
+            actual="$(git rev-parse "HEAD:$path")"
+            if [[ "$actual" != "$expected" ]]; then
+              echo "Accepted blob mismatch for $path: $actual" >&2
+              exit 1
+            fi
+          }
+          check_blob "$ACCEPTED_API_BLOB" futureeval_bot/api.py
+          check_blob "$ACCEPTED_MAIN_BLOB" futureeval_bot/__main__.py
+          check_blob "$ACCEPTED_SUMMARY_BLOB" futureeval_bot/operational_summary.py
+          check_blob "$ACCEPTED_INVENTORY_DIAGNOSTICS_BLOB" futureeval_bot/inventory_diagnostics.py
+          check_blob "$ACCEPTED_TEST_INVENTORY_DIAGNOSTICS_BLOB" tests/test_inventory_diagnostics.py
+          check_blob "$ACCEPTED_UNCHANGED_CORE_BLOB" futureeval_bot/core.py
+          check_blob "$ACCEPTED_UNCHANGED_READINESS_BLOB" futureeval_bot/readiness.py
+          check_blob "$ACCEPTED_UNCHANGED_REQUIREMENTS_BLOB" requirements.txt
+          check_blob "$ACCEPTED_UNCHANGED_CONFIG_BLOB" config.json
+          check_blob "$ACCEPTED_UNCHANGED_VERIFIER_BLOB" scripts/verify.py
+          check_blob "$ACCEPTED_UNCHANGED_TESTS_CONFTEST_BLOB" tests/conftest.py
+          check_blob "$EXPECTED_TEST_INVENTORY_BLOB" tests/test_inventory.py
+          check_blob "$EXPECTED_PAGINATION_INTEGRATION_BLOB" tests/test_pagination_inventory_integration.py
+          check_blob "$DIAGNOSTIC_HELPER_BLOB" scripts/pr18_collection_diagnostic.py
+          expected_correction_paths=$'.github/workflows/offline-verification.yml\nfutureeval_bot/__main__.py\nfutureeval_bot/operational_summary.py\nscripts/pr18_collection_diagnostic.py\ntests/test_inventory.py\ntests/test_inventory_diagnostics.py\ntests/test_operational_summary_pr15_ci.py\ntests/test_operational_summary_v2.py\ntests/test_pagination_inventory_integration.py'
+          actual_correction_paths="$(git diff --name-only "$PUBLISHED_PR18_HEAD" HEAD | LC_ALL=C sort)"
+          test "$actual_correction_paths" = "$expected_correction_paths"
+          expected_paths=$'.github/workflows/offline-verification.yml\nfutureeval_bot/__main__.py\nfutureeval_bot/api.py\nfutureeval_bot/inventory_diagnostics.py\nfutureeval_bot/operational_summary.py\nscripts/pr18_collection_diagnostic.py\ntests/test_inventory.py\ntests/test_inventory_diagnostics.py\ntests/test_operational_summary_pr15_ci.py\ntests/test_operational_summary_v2.py\ntests/test_pagination_inventory_integration.py'
+          actual_paths="$(git diff --name-only "$ACCEPTED_BASE_SHA" HEAD | LC_ALL=C sort)"
+          test "$actual_paths" = "$expected_paths"
+          printf 'Exact source base: %s\nBase tree: %s\n' "$ACCEPTED_BASE_SHA" "$ACCEPTED_BASE_TREE" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+
+      - name: Fetch and verify exact PR10 history for unchanged pin tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "$HISTORICAL_READINESS_COMMIT"
+          test "$(git rev-parse "$HISTORICAL_READINESS_COMMIT^{commit}")" = "$HISTORICAL_READINESS_COMMIT"
+          test "$(git rev-parse "$HISTORICAL_READINESS_COMMIT^{tree}")" = "$HISTORICAL_READINESS_TREE"
+          python - <<'PY'
+          import json
+          import subprocess
+          from pathlib import Path
+
+          commit = "f0a423142e6ccb499ba483fe769b8cfcb8e88b30"
+          tree = "6aab6dd6cb39d5feeebf6cf1f47a9e6f07309fd5"
+          manifest = json.loads(Path("tests/fixtures/readiness_release_bundle_manifest.json").read_text())
+          if manifest.get("base_commit") != commit or manifest.get("base_tree") != tree:
+              raise SystemExit("PR10 historical manifest identity changed")
+          for item in manifest.get("baseline_files", []):
+              actual = subprocess.run(
+                  ["git", "rev-parse", f"{commit}:{item['path']}"],
+                  check=True, capture_output=True, text=True,
+              ).stdout.strip()
+              if actual != item.get("sha"):
+                  raise SystemExit(f"PR10 pinned blob unavailable or mismatched: {item['path']}")
+          PY
+
+      - name: Install pinned direct dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Remove stale verifier records
+        run: rm -f outputs/offline-verification.json work/offline-tests.xml; mkdir -p outputs work
+
+      - name: Block new outbound traffic during verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v iptables
+          command -v ip6tables
+          tag="futureeval-inventory-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          sudo iptables -I OUTPUT 1 -o lo -m comment --comment "${tag}-v4-lo" -j ACCEPT
+          sudo iptables -I OUTPUT 2 -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment "${tag}-v4-established" -j ACCEPT
+          sudo iptables -I OUTPUT 3 -m comment --comment "${tag}-v4-reject" -j REJECT
+          sudo ip6tables -I OUTPUT 1 -o lo -m comment --comment "${tag}-v6-lo" -j ACCEPT
+          sudo ip6tables -I OUTPUT 2 -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment "${tag}-v6-established" -j ACCEPT
+          sudo ip6tables -I OUTPUT 3 -m comment --comment "${tag}-v6-reject" -j REJECT
+          verify_owned_rule() {
+            local tool="$1"
+            local marker="$2"
+            local saved count
+            saved="$(sudo "${tool}-save" -t filter)"
+            count="$(grep -F -c -- "$marker" <<< "$saved" || true)"
+            if [[ "$count" != 1 ]]; then
+              echo "Expected exactly one installed outbound rule for $marker; found $count." >&2
+              return 1
+            fi
+          }
+          verify_owned_rule iptables "${tag}-v4-lo"
+          verify_owned_rule iptables "${tag}-v4-established"
+          verify_owned_rule iptables "${tag}-v4-reject"
+          verify_owned_rule ip6tables "${tag}-v6-lo"
+          verify_owned_rule ip6tables "${tag}-v6-established"
+          verify_owned_rule ip6tables "${tag}-v6-reject"
+
+      - name: Preflight and verify exact test collection identity without tests
+        id: collect_identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          empty_home="$RUNNER_TEMP/futureeval-pr18-collection-home"
+          temp_root="$empty_home/tmp"
+          diagnostic_root="$RUNNER_TEMP/futureeval-pr18-collection-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$empty_home" "$temp_root"
+          mkdir "$diagnostic_root"
+          printf '{"status":"started","schema_version":1,"head_sha":"%s","base_sha":"%s","collection_only":true,"test_bodies_run":false}\n' "$EXPECTED_HEAD_SHA" "$EXPECTED_BASE_SHA" > "$diagnostic_root/started.json.tmp"
+          mv "$diagnostic_root/started.json.tmp" "$diagnostic_root/started.json"
+          set +e
+          cat scripts/pr18_collection_diagnostic.py | env -i PATH="$PATH" HOME="$empty_home" TMPDIR="$temp_root" LANG=C.UTF-8 PYTHONUTF8=1 LITELLM_LOCAL_MODEL_COST_MAP=True EXPECTED_TEST_CASES="$EXPECTED_TEST_CASES" EXPECTED_BASELINE_TEST_CASES="$EXPECTED_BASELINE_TEST_CASES" EXPECTED_BASELINE_NODE_ID_SHA256="$EXPECTED_BASELINE_NODE_ID_SHA256" GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" DIAGNOSTIC_ROOT="$diagnostic_root" DIAGNOSTIC_TAG="futureeval-inventory-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" EXPECTED_HEAD_SHA="$EXPECTED_HEAD_SHA" EXPECTED_BASE_SHA="$EXPECTED_BASE_SHA" python - >/dev/null 2>&1
+          collection_exit=$?
+          set -e
+          echo "exit_code=$collection_exit" >> "$GITHUB_OUTPUT"
+          exit "$collection_exit"
+
+      - name: Persist sanitized collection terminal result
+        if: always()
+        env:
+          DIAGNOSTIC_ROOT: ${{ runner.temp }}/futureeval-pr18-collection-${{ github.run_id }}-${{ github.run_attempt }}
+          COLLECTION_EXIT_CODE: ${{ steps.collect_identity.outputs.exit_code || '' }}
+          COLLECTION_STEP_OUTCOME: ${{ steps.collect_identity.outcome || 'unknown' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP" TMPDIR="$RUNNER_TEMP" PYTHONUTF8=1 DIAGNOSTIC_ROOT="$DIAGNOSTIC_ROOT" COLLECTION_EXIT_CODE="$COLLECTION_EXIT_CODE" COLLECTION_STEP_OUTCOME="$COLLECTION_STEP_OUTCOME" GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" python - <<'PY'
+          import json
+          import os
+          import pathlib
+          import re
+          import time
+
+          root = pathlib.Path(os.environ["DIAGNOSTIC_ROOT"])
+          root.mkdir(parents=True, exist_ok=True)
+          safe_classes = {
+              "AssertionError", "ConftestImportFailure", "FileNotFoundError", "ImportError",
+              "KeyError", "ModuleNotFoundError", "OSError", "Other", "PermissionError",
+              "RuntimeError", "TypeError", "ValueError",
+          }
+          safe_modules = {
+              "_pytest.config", "builtins", "futureeval_bot", "importlib", "os", "pluggy",
+              "pytest", "socket", "tempfile", "tests", "other",
+          }
+          safe_top_modules = {
+              "_pytest", "builtins", "futureeval_bot", "importlib", "os", "pluggy",
+              "pytest", "socket", "tempfile", "tests", "none", "other",
+          }
+          result = {
+              "schema_version": 1,
+              "status": "terminal_result_missing",
+              "head_sha": None,
+              "base_sha": None,
+              "collection_only": True,
+              "test_bodies_run": False,
+              "raw_output_retained": False,
+              "preflight": {},
+              "firewall_diagnostics": {
+                  "rule_save": {
+                      family: {"result": "not_run", "exit_code": None,
+                               "marker_counts_capped_at_2": {marker: None for marker in ("loopback", "established", "blocked_new")}}
+                      for family in ("ipv4", "ipv6")
+                  },
+                  "probes": {
+                      name: {"result": "not_run", "errno": "none"}
+                      for name in ("loopback", "new_outbound_ipv4")
+                  },
+              },
+              "collection": {
+                  "pytest_execution_confirmed": False,
+                  "collection_hook_reached": False,
+                  "counts": {"baseline": None, "new": None, "total": None},
+                  "checks": {},
+                  "exit_code": None,
+                  "failure_category": "child_result_missing",
+                  "failure_stage": "child_process",
+                  "exception_source": "exit_code_only",
+                  "exception_class": None,
+                  "exception_module": None,
+                  "normalized_top_level_module": None,
+              },
+          }
+          try:
+              started = json.loads((root / "started.json").read_text(encoding="utf-8"))
+              result["head_sha"] = started.get("head_sha")
+              result["base_sha"] = started.get("base_sha")
+          except (OSError, ValueError, TypeError):
+              pass
+          try:
+              child = json.loads((root / "child-result.json").read_text(encoding="utf-8"))
+              if isinstance(child, dict):
+                  result["status"] = child.get("status") if child.get("status") in {
+                      "collection_passed", "collection_failed", "preflight_failed", "diagnostic_error"
+                  } else "child_result_invalid"
+                  result["preflight"] = {
+                      key: value for key, value in child.get("preflight", {}).items()
+                      if isinstance(key, str) and type(value) is bool
+                  } if isinstance(child.get("preflight"), dict) else {}
+                  firewall = child.get("firewall_diagnostics")
+                  if isinstance(firewall, dict):
+                      rules = firewall.get("rule_save") if isinstance(firewall.get("rule_save"), dict) else {}
+                      probes = firewall.get("probes") if isinstance(firewall.get("probes"), dict) else {}
+                      rule_results = {"not_run", "success", "nonzero_exit", "launch_error", "invalid_exit", "invalid_output"}
+                      probe_results = {"not_run", "allowed", "blocked", "reachable", "unexpected_error", "probe_error"}
+                      errno_categories = {"none", "connection_refused", "host_unreachable", "network_unreachable", "permission_denied", "timed_out", "other"}
+                      result["firewall_diagnostics"] = {
+                          "rule_save": {
+                              family: {
+                                  "result": rules.get(family, {}).get("result") if isinstance(rules.get(family), dict) and rules[family].get("result") in rule_results else "unknown",
+                                  "exit_code": rules.get(family, {}).get("exit_code") if isinstance(rules.get(family), dict) and type(rules[family].get("exit_code")) is int and 0 <= rules[family]["exit_code"] <= 255 else None,
+                                  "marker_counts_capped_at_2": {
+                                      marker: rules.get(family, {}).get("marker_counts_capped_at_2", {}).get(marker)
+                                      if isinstance(rules.get(family), dict) and isinstance(rules[family].get("marker_counts_capped_at_2"), dict)
+                                      and type(rules[family]["marker_counts_capped_at_2"].get(marker)) is int and rules[family]["marker_counts_capped_at_2"][marker] in (0, 1, 2)
+                                      else None
+                                      for marker in ("loopback", "established", "blocked_new")
+                                  },
+                              }
+                              for family in ("ipv4", "ipv6")
+                          },
+                          "probes": {
+                              name: {
+                                  "result": probes.get(name, {}).get("result") if isinstance(probes.get(name), dict) and probes[name].get("result") in probe_results else "unknown",
+                                  "errno": probes.get(name, {}).get("errno") if isinstance(probes.get(name), dict) and probes[name].get("errno") in errno_categories else "other",
+                              }
+                              for name in ("loopback", "new_outbound_ipv4")
+                          },
+                      }
+                  c = child.get("collection") if isinstance(child.get("collection"), dict) else {}
+                  allowed_checks = {
+                      "baseline_count", "baseline_digest", "new_id_set", "total_count",
+                      "unique_ids", "casefold_collisions", "path_scope",
+                  }
+                  counts = c.get("counts") if isinstance(c.get("counts"), dict) else {}
+                  checks = c.get("checks") if isinstance(c.get("checks"), dict) else {}
+                  result["collection"] = {
+                      "pytest_execution_confirmed": c.get("pytest_execution_confirmed") is True,
+                      "collection_hook_reached": c.get("collection_hook_reached") is True,
+                      "counts": {
+                          key: counts.get(key) if type(counts.get(key)) is int and counts[key] >= 0 else None
+                          for key in ("baseline", "new", "total")
+                      },
+                      "checks": {key: checks.get(key) for key in allowed_checks if type(checks.get(key)) is bool},
+                      "exit_code": c.get("exit_code") if type(c.get("exit_code")) is int else None,
+                      "failure_category": c.get("failure_category") if c.get("failure_category") in {
+                          "pytest_initial_conftest_import", "pytest_configuration", "collection_identity",
+                          "pytest_import_output", "pytest_usage_exit", "pytest_nonzero_exit",
+                          "collection_hook_not_reached", "preflight_failed", "diagnostic_error",
+                      } else None,
+                      "failure_stage": c.get("failure_stage") if c.get("failure_stage") in {
+                          "preflight", "initial_conftests", "configuration", "session_start",
+                          "collection_finish", "pytest_main", "preflight_or_parent",
+                      } else None,
+                      "exception_source": c.get("exception_source") if c.get("exception_source") in {
+                          "direct_exception", "nested_cause", "output_derived", "exit_code_only", "unknown",
+                      } else "unknown",
+                      "exception_class": c.get("exception_class")
+                          if c.get("exception_class") in safe_classes else ("Other" if c.get("exception_class") else None),
+                      "exception_module": c.get("exception_module")
+                          if c.get("exception_module") in safe_modules else ("other" if c.get("exception_module") else None),
+                      "normalized_top_level_module": c.get("normalized_top_level_module")
+                          if c.get("normalized_top_level_module") in safe_top_modules
+                          else ("other" if c.get("normalized_top_level_module") else None),
+                  }
+          except (OSError, ValueError, TypeError):
+              pass
+          exit_text = os.environ.get("COLLECTION_EXIT_CODE", "")
+          result["step_exit_code"] = int(exit_text) if re.fullmatch(r"[0-9]{1,3}", exit_text) else None
+          step_outcome = os.environ.get("COLLECTION_STEP_OUTCOME", "unknown")
+          result["step_outcome"] = step_outcome if step_outcome in {
+              "success", "failure", "cancelled", "skipped"
+          } else "unknown"
+          result["ended_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+          temp = root / "terminal.json.tmp"
+          final = root / "terminal.json"
+          with temp.open("x", encoding="utf-8") as stream:
+              json.dump(result, stream, sort_keys=True)
+              stream.flush()
+              os.fsync(stream.fileno())
+          os.replace(temp, final)
+          print(json.dumps(result, sort_keys=True))
+          with pathlib.Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
+              summary.write("\nPR18 sanitized collection terminal record\n")
+              summary.write(json.dumps(result, sort_keys=True) + "\n")
+          PY
+      - name: Run complete offline verifier without credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          empty_home="$RUNNER_TEMP/futureeval-inventory-empty-home"
+          mkdir -p "$empty_home/tmp"
+          env -i PATH="$PATH" HOME="$empty_home" TMPDIR="$empty_home/tmp" LANG=C.UTF-8 PYTHONUTF8=1 LITELLM_LOCAL_MODEL_COST_MAP=True python scripts/verify.py
+
+      - name: Validate exact full offline report and JUnit evidence
+        if: always()
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+          from futureeval_bot.core import Config, source_hashes
+
+          report_path = Path("outputs/offline-verification.json")
+          junit_path = Path("work/offline-tests.xml")
+          if not report_path.is_file() or not junit_path.is_file():
+              raise SystemExit("complete offline verification evidence is missing")
+          report_bytes = report_path.read_bytes()
+          junit_bytes = junit_path.read_bytes()
+          report = json.loads(report_bytes)
+          cases = list(ET.parse(junit_path).iter("testcase"))
+          checks = report.get("checks")
+          expected = int(os.environ["EXPECTED_TEST_CASES"])
+          if report.get("passed") is not True:
+              raise SystemExit("complete offline verifier did not pass")
+          if report.get("source_hashes") != source_hashes():
+              raise SystemExit("source hashes do not match the exact checkout")
+          if report.get("config_fingerprint") != Config.load("config.json").fingerprint:
+              raise SystemExit("configuration fingerprint does not match the exact checkout")
+          if len(cases) != expected or type(report.get("test_count")) is not int or report["test_count"] != expected:
+              raise SystemExit("full-suite test count does not match 294 baseline plus 12 exact additions")
+          if not isinstance(checks, list) or len(checks) != expected:
+              raise SystemExit("report checks do not match the exact collected JUnit case count")
+          if [item.get("name") if isinstance(item, dict) else None for item in checks] != [case.attrib.get("name") for case in cases]:
+              raise SystemExit("report check names do not match JUnit case names")
+          if any(case.find(tag) is not None for case in cases for tag in ("failure", "error", "skipped")):
+              raise SystemExit("one or more tests failed, errored, or skipped")
+          if any(not isinstance(item, dict) or item.get("passed") is not True for item in checks):
+              raise SystemExit("one or more report checks failed or are malformed")
+          report_hash = hashlib.sha256(report_bytes).hexdigest()
+          junit_hash = hashlib.sha256(junit_bytes).hexdigest()
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write(f"\n## Full offline verification\n\n- Head: {os.environ['EXPECTED_HEAD_SHA']}\n- Base: {os.environ['EXPECTED_BASE_SHA']}\n- Test cases: {len(cases)}; all passed, none skipped\n- Source/configuration identities: matched exact checkout\n- Report SHA-256: {report_hash}\n- JUnit SHA-256: {junit_hash}\n")
+          PY
+
+      - name: Restore only this job's temporary outbound rules
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="futureeval-inventory-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          remove_owned_rule() {
+            local tool="$1"
+            local marker="$2"
+            shift 2
+            local saved count
+            saved="$(sudo "${tool}-save" -t filter)"
+            count="$(grep -F -c -- "$marker" <<< "$saved" || true)"
+            if [[ "$count" == 0 ]]; then return 0; fi
+            if [[ "$count" != 1 ]]; then
+              echo "Expected at most one owned firewall rule for $marker; found $count." >&2
+              return 1
+            fi
+            sudo "$tool" -D OUTPUT "$@"
+            saved="$(sudo "${tool}-save" -t filter)"
+            if grep -Fq -- "$marker" <<< "$saved"; then
+              echo "Owned firewall rule remains after cleanup: $marker." >&2
+              return 1
+            fi
+          }
+          remove_owned_rule iptables "${tag}-v4-lo" -o lo -m comment --comment "${tag}-v4-lo" -j ACCEPT
+          remove_owned_rule iptables "${tag}-v4-established" -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment "${tag}-v4-established" -j ACCEPT
+          remove_owned_rule iptables "${tag}-v4-reject" -m comment --comment "${tag}-v4-reject" -j REJECT
+          remove_owned_rule ip6tables "${tag}-v6-lo" -o lo -m comment --comment "${tag}-v6-lo" -j ACCEPT
+          remove_owned_rule ip6tables "${tag}-v6-established" -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment "${tag}-v6-established" -j ACCEPT
+          remove_owned_rule ip6tables "${tag}-v6-reject" -m comment --comment "${tag}-v6-reject" -j REJECT

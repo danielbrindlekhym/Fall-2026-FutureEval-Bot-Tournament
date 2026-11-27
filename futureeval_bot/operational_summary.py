@@ -44,6 +44,104 @@ _STAGES = {
     "run_selected_operation": "BOT_OPERATION_OUTCOME",
 }
 
+# Keep the operational summary executable as a standalone file with no local
+# package imports. This projection mirrors the producer schema and fails closed.
+_DIAGNOSTIC_KEYS = {
+    "schema_version", "status", "failure_subtype", "pagination_disposition",
+    "pages_completed", "items_received", "last_page_items", "pagination_complete",
+}
+_DIAGNOSTIC_FAILURES = {
+    "none", "transport_timeout", "transport_connection", "transport_other", "http_auth",
+    "http_not_found", "http_rate_limited", "http_server_exhausted", "http_other",
+    "response_top_level_shape", "response_results_shape", "response_post_shape",
+    "response_question_shape", "continuation_missing", "continuation_fragment",
+    "continuation_query_missing", "continuation_origin_or_path", "continuation_query_syntax",
+    "continuation_offset_invalid", "continuation_filter_mismatch",
+    "continuation_repeated_or_nonadvancing", "page_limit_exhausted",
+    "supported_metadata_invalid", "state_read_failed", "state_write_failed",
+    "other_inventory", "unknown",
+}
+_DIAGNOSTIC_DISPOSITIONS = {
+    "not_started", "terminal_no_next", "next_validated", "continuation_rejected",
+    "request_failed", "response_shape_failed", "page_limit_reached", "unknown",
+}
+_DIAGNOSTIC_BINDING_KEYS = {
+    "operation_id", "repository", "workflow_path", "workflow_run_id",
+    "workflow_run_attempt", "source_sha", "config_fingerprint", "started_at",
+}
+_UNKNOWN_DIAGNOSTICS = {
+    "schema_version": 1, "status": "unknown", "failure_subtype": "unknown",
+    "pagination_disposition": "unknown", "pages_completed": None,
+    "items_received": None, "last_page_items": None, "pagination_complete": None,
+}
+
+
+def _valid_diagnostics(value: object) -> dict | None:
+    if not isinstance(value, dict) or set(value) != _DIAGNOSTIC_KEYS:
+        return None
+    if type(value.get("schema_version")) is not int or value["schema_version"] != 1:
+        return None
+    if value.get("status") not in {"complete", "failed", "partial", "unknown"}:
+        return None
+    if value.get("failure_subtype") not in _DIAGNOSTIC_FAILURES:
+        return None
+    if value.get("pagination_disposition") not in _DIAGNOSTIC_DISPOSITIONS:
+        return None
+    pages, items, last = value["pages_completed"], value["items_received"], value["last_page_items"]
+    if pages is not None and (type(pages) is not int or not 0 <= pages <= 30):
+        return None
+    if items is not None and (type(items) is not int or not 0 <= items <= 3000):
+        return None
+    if last is not None and (type(last) is not int or not 0 <= last <= 100):
+        return None
+    complete = value["pagination_complete"]
+    if complete is not None and type(complete) is not bool:
+        return None
+    if pages is not None and items is not None and items > pages * 100:
+        return None
+    if last is not None and items is not None and last > items:
+        return None
+    if pages == 0 and ((items is not None and items != 0) or (last is not None and last != 0)):
+        return None
+    status, subtype, disposition = value["status"], value["failure_subtype"], value["pagination_disposition"]
+    if status == "complete":
+        if (subtype != "none" or disposition != "terminal_no_next" or complete is not True
+                or type(pages) is not int or pages < 1 or type(items) is not int or type(last) is not int):
+            return None
+    elif status == "unknown":
+        if (subtype != "unknown" or disposition != "unknown" or complete is not None
+                or pages is not None or items is not None or last is not None):
+            return None
+    elif subtype == "none":
+        return None
+    if status == "partial" and complete is True:
+        return None
+    if disposition == "continuation_rejected" and complete is not False:
+        return None
+    if complete is True and disposition != "terminal_no_next":
+        return None
+    return {key: value[key] for key in (
+        "schema_version", "status", "failure_subtype", "pagination_disposition",
+        "pages_completed", "items_received", "last_page_items", "pagination_complete")}
+
+
+def _summary_inventory_diagnostics(raw: object, expected_binding: object, operation_status: object) -> dict:
+    try:
+        record = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(record, dict) or set(record) != {"binding", "diagnostics"}:
+            return dict(_UNKNOWN_DIAGNOSTICS)
+        binding = record["binding"]
+        if not isinstance(binding, dict) or set(binding) != _DIAGNOSTIC_BINDING_KEYS:
+            return dict(_UNKNOWN_DIAGNOSTICS)
+        if not isinstance(expected_binding, dict) or binding != expected_binding:
+            return dict(_UNKNOWN_DIAGNOSTICS)
+        clean = _valid_diagnostics(record["diagnostics"])
+        if clean is None or (clean["status"] == "complete" and operation_status != "completed"):
+            return dict(_UNKNOWN_DIAGNOSTICS)
+        return clean
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return dict(_UNKNOWN_DIAGNOSTICS)
+
 
 def _time(value: object) -> datetime | None:
     if not isinstance(value, str):
@@ -206,6 +304,7 @@ def collect_summary(database: str | Path, *, config_path: str | Path = "config.j
     """Read only allowlisted aggregate/status columns; never select payload or response data."""
     env = dict(os.environ if env is None else env)
     result, start, finish, run_id, attempt = _context(env, config_path)
+    result["inventory_diagnostics"] = dict(_UNKNOWN_DIAGNOSTICS)
     db_path = Path(database)
     if not db_path.is_file():
         result.update(summary_status="unavailable", unavailable_reason="database_missing")
@@ -238,6 +337,7 @@ def collect_summary(database: str | Path, *, config_path: str | Path = "config.j
             op = None
             call_rows = None
             receipt_rows = None
+            inventory_raw = None
             if op_id and {"operations", "call_attribution", "receipt_events"} <= table_names:
                 op = db.execute(
                     "SELECT operation_id,repository,workflow_path,workflow_run_id,workflow_run_attempt,"
@@ -246,6 +346,12 @@ def collect_summary(database: str | Path, *, config_path: str | Path = "config.j
                     "checkpoint_continuity,observed_questions FROM operations WHERE operation_id=?", (op_id,)
                 ).fetchone()
                 if op is not None:
+                    try:
+                        row = db.execute("SELECT value FROM meta WHERE key=?",
+                            ("inventory_diagnostics:" + op_id,)).fetchone()
+                        inventory_raw = row[0] if row is not None else None
+                    except sqlite3.Error:
+                        inventory_raw = None
                     call_rows = db.execute(
                         "SELECT c.id,c.status,c.cost,a.workflow_run_id,a.workflow_run_attempt,a.source_sha,"
                         "a.outcome_status,a.cost_receipt_status,a.cost_received_at "
@@ -271,6 +377,14 @@ def collect_summary(database: str | Path, *, config_path: str | Path = "config.j
             if not row_mismatch:
                 result["run_binding_status"] = "bound_complete"
                 result["run_attribution_status"] = "complete"
+                expected_inventory_binding = {
+                    "operation_id": op["operation_id"], "repository": op["repository"],
+                    "workflow_path": op["workflow_path"], "workflow_run_id": op["workflow_run_id"],
+                    "workflow_run_attempt": op["workflow_run_attempt"], "source_sha": op["source_sha"],
+                    "config_fingerprint": op["config_fingerprint"], "started_at": op["started_at"],
+                }
+                result["inventory_diagnostics"] = _summary_inventory_diagnostics(
+                    inventory_raw, expected_inventory_binding, op["status"])
                 result["operation_outcome"] = op["status"]
                 result["run_observed_questions"] = op["observed_questions"]
                 def safe_counter(raw, allowed):

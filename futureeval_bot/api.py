@@ -17,6 +17,18 @@ from .readiness import ReadinessStopped, check as check_readiness
 class ServiceError(RuntimeError):
     pass
 
+class FeedPaginationIncomplete(ServiceError):
+    """A fixed-reason inventory failure; carries bounded counts, never feed content."""
+
+    def __init__(self, failure_subtype, pagination_disposition, pages_completed,
+                 items_received, last_page_items):
+        self.failure_subtype = failure_subtype
+        self.pagination_disposition = pagination_disposition
+        self.pages_completed = pages_completed
+        self.items_received = items_received
+        self.last_page_items = last_page_items
+        super().__init__("Inventory pagination incomplete")
+
 
 class Metaculus:
     BASE = "https://www.metaculus.com/api"
@@ -29,8 +41,13 @@ class Metaculus:
         self.timeout = timeout
         self.user_id = None
         self.next_request = 0.0
+        self.last_request_failure_subtype = "unknown"
+        self.inventory_failure_subtype = "unknown"
+        self.inventory_pagination_disposition = "not_started"
+        self.feed_pages = []
 
     def request(self, method: str, path: str, **kwargs):
+        self.last_request_failure_subtype = "unknown"
         if not path.startswith("/") or path.startswith("//"):
             raise ValueError("API paths must be relative to Metaculus")
         tries = 3 if method == "GET" else 1
@@ -39,20 +56,39 @@ class Metaculus:
             self.next_request = time.monotonic() + 1.25
             try:
                 response = self.session.request(method, self.BASE + path, timeout=self.timeout, **kwargs)
-            except requests.RequestException:
+            except requests.RequestException as error:
                 if attempt + 1 == tries:
+                    self.last_request_failure_subtype = (
+                        "transport_timeout" if isinstance(error, requests.Timeout) else
+                        "transport_connection" if isinstance(error, requests.ConnectionError) else
+                        "transport_other")
                     raise ServiceError(f"Metaculus {method} transport failed; reconcile before retry") from None
                 time.sleep(2 ** attempt)
                 continue
             if response.status_code in (429, 500, 502, 503, 504) and attempt + 1 < tries:
+                if response.status_code == 429:
+                    self.last_request_failure_subtype = "http_rate_limited"
                 delay = float(response.headers.get("Retry-After", 15 if response.status_code == 429 else 2 ** attempt))
                 if delay > 60:
                     raise ServiceError('Metaculus requested a long cooldown; defer to the next scheduled run')
                 time.sleep(max(0, delay))
                 continue
             if not response.ok:
-                raise ServiceError(f"Metaculus {method} {path} returned HTTP {response.status_code}")
-            return response.json() if response.content else {}
+                status = response.status_code
+                self.last_request_failure_subtype = (
+                    "http_auth" if status in (401, 403) else
+                    "http_not_found" if status == 404 else
+                    "http_rate_limited" if status == 429 else
+                    "http_server_exhausted" if status in (500, 502, 503, 504) and attempt + 1 == tries else
+                    "http_other")
+                raise ServiceError(f"Metaculus {method} {path} returned HTTP {status}")
+            if not response.content:
+                return {}
+            try:
+                return response.json()
+            except (ValueError, TypeError):
+                self.last_request_failure_subtype = "response_top_level_shape"
+                raise
         raise ServiceError("Metaculus request failed")
 
     def identity(self, expected_id: int) -> dict:
@@ -62,6 +98,22 @@ class Metaculus:
         self.user_id = user["id"]
         return {key: user.get(key) for key in ("id", "username", "is_bot", "is_primary_bot", "api_forecasting_access")}
 
+    def inventory_progress(self):
+        pages = self.feed_pages if isinstance(self.feed_pages, list) else []
+        pages_completed = len(pages)
+        items_received = sum(p.get("count", 0) for p in pages if isinstance(p, dict))
+        last_page_items = pages[-1].get("count", 0) if pages else 0
+        return {"pages_completed": pages_completed, "items_received": items_received,
+                "last_page_items": last_page_items, "pagination_disposition": self.inventory_pagination_disposition,
+                "pagination_complete": self.inventory_pagination_disposition == "terminal_no_next"}
+
+    def _pagination_failure(self, subtype, disposition="continuation_rejected"):
+        self.inventory_failure_subtype = subtype
+        self.inventory_pagination_disposition = disposition
+        progress = self.inventory_progress()
+        raise FeedPaginationIncomplete(subtype, disposition, progress["pages_completed"],
+            progress["items_received"], progress["last_page_items"])
+
     def posts(self, project: int, *, statuses: list[str] | None = None) -> list[dict]:
         params = {"tournaments": project, "include_descriptions": "true", "with_cp": "false", "limit": 100, "offset": 0,
                   "order_by": "scheduled_close_time"}
@@ -69,55 +121,79 @@ class Metaculus:
             params["statuses"] = statuses
         posts = []
         self.feed_pages = []
+        self.inventory_failure_subtype = "unknown"
+        self.inventory_pagination_disposition = "not_started"
         seen_offsets = {params["offset"]}
         origin = urlsplit(self.BASE)
         expected_path = origin.path.rstrip("/") + "/posts/"
         for page in range(30):
             offset = params["offset"]
-            data = self.request("GET", "/posts/", params=params)
+            try:
+                data = self.request("GET", "/posts/", params=params)
+            except Exception:
+                self.inventory_failure_subtype = self.last_request_failure_subtype
+                self.inventory_pagination_disposition = (
+                    "response_shape_failed" if self.last_request_failure_subtype == "response_top_level_shape"
+                    else "request_failed")
+                raise
+            if not isinstance(data, dict):
+                self._pagination_failure("response_top_level_shape", "response_shape_failed")
             results = data.get("results")
-            if not isinstance(results, list):
-                raise ServiceError("Unexpected posts response")
+            if not isinstance(results, list) or len(results) > 100:
+                self._pagination_failure("response_results_shape", "response_shape_failed")
+            if any(not isinstance(post, dict) for post in results):
+                self._pagination_failure("response_post_shape", "response_shape_failed")
             next_url = data.get("next")
             has_next = "next" not in data or next_url is not None
             self.feed_pages.append({"offset": offset, "count": len(results), "has_next": has_next})
             posts.extend(results)
             if not has_next:
+                self.inventory_pagination_disposition = "terminal_no_next"
                 return posts
+            if "next" not in data:
+                self._pagination_failure("continuation_missing")
+            if not isinstance(next_url, str) or not next_url:
+                self._pagination_failure("continuation_missing")
             try:
-                if not isinstance(next_url, str) or not next_url:
-                    return posts
                 continuation = urlsplit(next_url)
-                if continuation.fragment or not continuation.query:
-                    return posts
-                if continuation.scheme or continuation.netloc:
-                    if (continuation.scheme.lower() != origin.scheme.lower()
-                            or continuation.netloc.lower() != origin.netloc.lower()
-                            or continuation.path != expected_path):
-                        return posts
-                elif continuation.path not in ("", expected_path):
-                    return posts
-                pairs = parse_qsl(continuation.query, keep_blank_values=True, strict_parsing=True)
-                offsets = [value for key, value in pairs if key == "offset"]
-                if len(offsets) != 1 or not offsets[0].isdecimal():
-                    return posts
-                expected_filters = []
-                for key, value in params.items():
-                    if key == "offset":
-                        continue
-                    values = value if isinstance(value, (list, tuple)) else (value,)
-                    expected_filters.extend((str(key), str(item)) for item in values)
-                actual_filters = [(key, value) for key, value in pairs if key != "offset"]
-                if sorted(actual_filters) != sorted(expected_filters):
-                    return posts
-                next_offset = int(offsets[0])
             except (TypeError, ValueError):
-                return posts
+                self._pagination_failure("continuation_fragment")
+            if continuation.fragment:
+                self._pagination_failure("continuation_fragment")
+            if not continuation.query:
+                self._pagination_failure("continuation_query_missing")
+            if continuation.scheme or continuation.netloc:
+                if (continuation.scheme.lower() != origin.scheme.lower()
+                        or continuation.netloc.lower() != origin.netloc.lower()
+                        or continuation.path != expected_path):
+                    self._pagination_failure("continuation_origin_or_path")
+            elif continuation.path not in ("", expected_path):
+                self._pagination_failure("continuation_origin_or_path")
+            try:
+                pairs = parse_qsl(continuation.query, keep_blank_values=True, strict_parsing=True)
+            except (TypeError, ValueError):
+                self._pagination_failure("continuation_query_syntax")
+            offsets = [value for key, value in pairs if key == "offset"]
+            if len(offsets) != 1 or not offsets[0].isdecimal():
+                self._pagination_failure("continuation_offset_invalid")
+            expected_filters = []
+            for key, value in params.items():
+                if key == "offset":
+                    continue
+                values = value if isinstance(value, (list, tuple)) else (value,)
+                expected_filters.extend((str(key), str(item)) for item in values)
+            actual_filters = [(key, value) for key, value in pairs if key != "offset"]
+            if sorted(actual_filters) != sorted(expected_filters):
+                self._pagination_failure("continuation_filter_mismatch")
+            next_offset = int(offsets[0])
             if next_offset <= offset or next_offset in seen_offsets:
-                return posts
+                self._pagination_failure("continuation_repeated_or_nonadvancing")
+            if next_offset != offset + len(results):
+                self._pagination_failure("continuation_offset_invalid")
             seen_offsets.add(next_offset)
             params["offset"] = next_offset
-        raise ServiceError("Feed exceeded the pagination safety limit")
+            self.inventory_pagination_disposition = "next_validated"
+        self._pagination_failure("page_limit_exhausted", "page_limit_reached")
 
     def post(self, post_id: int) -> dict:
         return self.request("GET", f"/posts/{int(post_id)}/", params={"with_cp": "false"})

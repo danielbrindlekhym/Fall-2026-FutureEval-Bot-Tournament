@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from futureeval_bot.api import Metaculus
+from futureeval_bot.api import FeedPaginationIncomplete, Metaculus
 from futureeval_bot.core import Config, Contract, State, utcnow
 import futureeval_bot.__main__ as entry
 from futureeval_bot.inventory import release_inventory, inventory_counts
@@ -128,8 +128,16 @@ def test_existing_page_requests_and_return_values_are_unchanged():
 
 def test_existing_empty_page_policy_is_preserved_and_exposed():
     remote = Metaculus.__new__(Metaculus)
-    remote.request = lambda *args, **kwargs: {'results':[],'next':'synthetic-next'}
+    remote.request = lambda *args, **kwargs: {'results':[],'next':None}
     assert remote.posts(33121) == []
+    assert remote.feed_pages == [{'offset':0,'count':0,'has_next':False}]
+
+    remote = Metaculus.__new__(Metaculus)
+    remote.request = lambda *args, **kwargs: {'results':[]}
+    with pytest.raises(FeedPaginationIncomplete) as caught:
+        remote.posts(33121)
+    assert caught.value.failure_subtype == 'continuation_missing'
+    assert caught.value.pages_completed == 1 and caught.value.items_received == 0
     assert remote.feed_pages == [{'offset':0,'count':0,'has_next':True}]
 
 
